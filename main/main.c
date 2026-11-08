@@ -36,6 +36,8 @@
 #define DEVICE_NAME       "ESP KVM"   // name the computers see
 #define RESET_GPIO        GPIO_NUM_0  // BOOT button (press = switch the Wi-Fi page on)
 #define LED_GPIO          GPIO_NUM_2  // on-board LED on most 38-pin boards: lit = computer 2
+#define LED1_GPIO         GPIO_NUM_25 // external LED (GPIO -> 330 ohm -> LED -> GND): lit = computer 1
+#define LED2_GPIO         GPIO_NUM_26 // external LED: lit = computer 2
 #define HK_RIGHT          0x4F        // right arrow: Ctrl+Shift+Right = computer 2
 #define HK_LEFT           0x50        // left arrow:  Ctrl+Shift+Left  = computer 1
 // -------------------------------------------------------------------------
@@ -214,6 +216,14 @@ static uint8_t last_keys[32];
 static uint8_t suppressed[32];   // keys swallowed by the hotkey until released
 static uint16_t last_consumer;
 
+// Shows the active computer: LED1 = computer 1, LED2 and the on-board LED = computer 2
+static void led_update(void)
+{
+    gpio_set_level(LED1_GPIO, active == 0);
+    gpio_set_level(LED2_GPIO, active == 1);
+    gpio_set_level(LED_GPIO, active == 1);
+}
+
 static bool host_ok(int h) { return host[h].conn != NONE && host[h].encrypted; }
 
 static void merged_keys(uint8_t out[32])
@@ -347,7 +357,7 @@ static void switch_to(int target)
     last_consumer = 0;
     acc_x = acc_y = acc_w = acc_p = 0;
     sent_buttons = 0;
-    gpio_set_level(LED_GPIO, active == 1);
+    led_update();
     ESP_LOGI(TAG, ">>> Switched to computer %d%s", active + 1,
              host_ok(active) ? "" : " (not connected yet)");
     send_keys();
@@ -1049,7 +1059,7 @@ void kvm_swap_hosts(void)
     active = 1 - active;
     kvm_cfg.mod_swap = ((kvm_cfg.mod_swap & 1) << 1) | ((kvm_cfg.mod_swap >> 1) & 1);   // setting follows the computer
     kvm_cfg_save();
-    gpio_set_level(LED_GPIO, active == 1);
+    led_update();
     for (int i = 0; i < NUM_HOSTS; i++) {
         char key[8];
         snprintf(key, sizeof(key), "host%d", i);
@@ -1140,9 +1150,12 @@ void app_main(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io);
-    gpio_reset_pin(LED_GPIO);
-    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(LED_GPIO, 0);
+    const gpio_num_t leds[] = { LED_GPIO, LED1_GPIO, LED2_GPIO };
+    for (int i = 0; i < 3; i++) {
+        gpio_reset_pin(leds[i]);
+        gpio_set_direction(leds[i], GPIO_MODE_OUTPUT);
+    }
+    led_update();
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
