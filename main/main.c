@@ -362,6 +362,9 @@ static void switch_to(int target)
              host_ok(active) ? "" : " (not connected yet)");
     send_keys();
     forward_leds();
+    struct ble_gap_conn_desc cd;                  // for lag diagnosis: how fast is the new computer's link?
+    if (host_ok(active) && ble_gap_conn_find(host[active].conn, &cd) == 0)
+        ESP_LOGI(TAG, "Computer %d link %.2f ms lat %d", active + 1, cd.conn_itvl * 1.25, cd.conn_latency);
 }
 
 static bool is_modifier(int u) { return u >= 0xE0 && u <= 0xE7; }
@@ -1115,6 +1118,7 @@ static void upd_tick(struct ble_npl_event *ev)
         if (fast || (usable && upd_tries[h] >= 3)) continue;
         struct ble_gap_upd_params up = { .itvl_min = 12, .itvl_max = upd_tries[h] < 3 ? 12 : 24,
                                          .latency = 0, .supervision_timeout = 400 };
+        ESP_LOGI(TAG, "Computer %d link %.2f ms lat %d -> asking %.2f ms", h + 1, d.conn_itvl * 1.25, d.conn_latency, up.itvl_min * 1.25);
         ble_gap_update_params(host[h].conn, &up);
         upd_tries[h]++;
     }
