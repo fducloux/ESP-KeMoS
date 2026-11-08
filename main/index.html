@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP KVM</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1b1d21;--mut:#6b7280;--line:#e2e5ea;--acc:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#b45309}
+@media(prefers-color-scheme:dark){:root{--bg:#111316;--card:#1a1d22;--fg:#eceef2;--mut:#9aa1ad;--line:#2b3038;--acc:#5b8cff;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;padding:16px;max-width:560px;margin-inline:auto}
+h1{font-size:20px;margin:4px 0 14px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.row+.row{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.sub{color:var(--mut);font-size:13px;word-break:break-all}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut);margin-right:7px}
+.dot.on{background:var(--ok)}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:10px;padding:10px 14px;min-height:44px}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.dng{color:var(--bad);border-color:var(--bad)}
+button:disabled{opacity:.45}
+.sw{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sw button{padding:16px;font-size:17px}
+label{display:block;font-size:14px;margin:12px 0 4px}
+input,select{font:inherit;width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);min-height:44px}
+.chk{display:flex;gap:10px;align-items:center;margin-top:12px}.chk input{width:22px;min-height:0;height:22px}
+.warn{border-color:var(--warn);color:var(--warn);font-size:14px}
+#msg{position:fixed;left:16px;right:16px;bottom:16px;background:var(--fg);color:var(--bg);padding:12px 14px;border-radius:10px;opacity:0;transition:opacity .2s;pointer-events:none;text-align:center}
+#msg.show{opacity:1}
+</style>
+</head>
+<body>
+<h1>ESP KVM</h1>
+<div id="warn" class="card warn" hidden>Login password is still the default (admin1234). Change it under Settings.</div>
+
+<div id="pin" class="card" hidden style="text-align:center;border-color:var(--acc)">
+  <div class="sub" id="pinfor"></div>
+  <div id="pincode" style="font:700 40px ui-monospace,monospace;letter-spacing:.12em;margin:6px 0"></div>
+</div>
+
+<h2>Active computer</h2>
+<div class="sw">
+  <button id="sw0" onclick="act('switch0')">Computer 1</button>
+  <button id="sw1" onclick="act('switch1')">Computer 2</button>
+</div>
+
+<h2>Computers</h2>
+<div class="card"><div id="hosts"></div>
+  <div class="row"><span>Swap computer 1 and 2<br><span class="sub">Same computers, numbers exchanged</span></span><button onclick="act('swap_hosts','Swap computer 1 and 2?')">Swap</button></div></div>
+
+<h2>Keyboard and mouse</h2>
+<div class="card" id="inputs"></div>
+
+<h2>Settings</h2>
+<div class="card">
+  <div class="chk"><input type="checkbox" id="swap0"><span>Computer 1: swap Alt and Command/Win keys (Mac layout)</span></div>
+  <div class="chk"><input type="checkbox" id="swap1"><span>Computer 2: swap Alt and Command/Win keys (Mac layout)</span></div>
+  <label>Mouse button that switches computers (hold Ctrl+Shift and click it). Keyboard: Ctrl+Shift+Left = computer 1, Right = computer 2.</label>
+  <div class="row"><span id="swbtn" class="sub"></span>
+    <span><button onclick="act('learn_btn')">Learn</button> <button onclick="act('clear_btn')">Clear</button></span></div>
+  <label for="prefix">Pair only devices whose name starts with (empty = any)</label>
+  <input id="prefix" maxlength="15" autocapitalize="off">
+  <label for="apmin">Wi-Fi page switches off after (minutes, 0 = never)</label>
+  <input id="apmin" type="number" min="0" max="240" inputmode="numeric">
+  <label for="webpass">New login password (empty = keep)</label>
+  <input id="webpass" type="password" autocomplete="new-password" placeholder="6 to 31 characters">
+  <label for="appass">New Wi-Fi password (empty = keep)</label>
+  <input id="appass" type="password" autocomplete="new-password" placeholder="8 to 31 characters">
+  <div style="margin-top:14px"><button class="pri" onclick="save()">Save settings</button></div>
+</div>
+
+<h2>Maintenance</h2>
+<div class="card">
+  <div class="row"><span>Switch this Wi-Fi page off now<br><span class="sub" id="left"></span></span><button onclick="act('ap_off','Switch the Wi-Fi page off? Press BOOT on the board to bring it back.')">Off</button></div>
+  <div class="row"><span>Reboot the board</span><button onclick="act('reboot','Reboot now?')">Reboot</button></div>
+  <div class="row"><span>Reset settings to defaults<br><span class="sub">Keeps pairings</span></span><button class="dng" onclick="act('reset_settings','Reset all settings (including both passwords) to defaults?')">Reset</button></div>
+  <div class="row"><span>Wipe all pairings<br><span class="sub">Computers and keyboard/mouse</span></span><button class="dng" onclick="act('wipe','Forget both computers AND the keyboard and mouse?')">Wipe</button></div>
+</div>
+<p class="sub" id="foot"></p>
+<div id="msg"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let loaded=false,failed=0;
+function toast(t){const m=$('msg');m.textContent=t;m.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>m.classList.remove('show'),2600)}
+
+async function call(url,opt){
+  const r=await fetch(url,opt);
+  if(r.status===401){location.reload();throw new Error('login')}
+  return r;
+}
+async function act(name,ask){
+  if(ask&&!confirm(ask))return;
+  try{
+    const r=await call('/api/action?name='+name,{method:'POST'});
+    if(!r.ok){toast(await r.text());return}
+    if(['wipe','reset_settings','reboot'].includes(name))toast('Rebooting. Rejoin the Wi-Fi in a few seconds.');
+    else if(name==='ap_off')toast('Wi-Fi page is switching off');
+    else if(name.startsWith('pair_')&&name!=='pair_cancel')toast(name.startsWith('pair_host')?'Pairing on. Now add ESP KVM in the computer\'s Bluetooth settings.':'Pairing on. Put the device in pairing mode (hold its Easy-Switch key).');
+    else toast('Done');
+    setTimeout(load,500);
+  }catch(e){toast('No connection')}
+}
+async function save(){
+  const body={prefix:$('prefix').value,
+    apmin:+$('apmin').value,modswap:($('swap0').checked?1:0)|($('swap1').checked?2:0),webpass:$('webpass').value,appass:$('appass').value};
+  try{
+    const r=await call('/api/config',{method:'POST',body:JSON.stringify(body)});
+    const t=await r.text();
+    if(!r.ok){toast(t);return}
+    $('webpass').value='';$('appass').value='';
+    toast(t==='ok-ap'?'Saved. New Wi-Fi password applies after the Wi-Fi page restarts (BOOT or reboot).':'Saved');
+    if(body.webpass)toast('Saved. Log in again with the new password.');
+    loaded=false;load();
+  }catch(e){toast('No connection')}
+}
+function dev(name,d,forget,pair,tid,s){
+  const pairing=s.pairing===tid;
+  let st=d.connected?(d.ready===false?'connecting':'connected'):(d.known?'paired, not connected':'not paired');
+  if(pairing)st='pairing mode, '+s.pair_left+' s left';
+  const btn=d.known?`<button class="dng" onclick="act('${forget}','Forget ${name}?')">Forget</button>`
+    :pairing?`<button onclick="act('pair_cancel')">Cancel</button>`
+    :`<button class="pri" onclick="act('${pair}')">Pair</button>`;
+  return `<div class="row"><div><span class="dot ${d.connected||pairing?'on':''}"></span>${name}<div class="sub">${st}${d.addr?' · '+d.addr:''}</div></div>${btn}</div>`;
+}
+function render(s){
+  $('sw0').classList.toggle('pri',s.active===0);$('sw1').classList.toggle('pri',s.active===1);
+  $('hosts').innerHTML=dev('Computer 1',s.hosts[0],'forget_host0','pair_host0',1,s)+dev('Computer 2',s.hosts[1],'forget_host1','pair_host1',2,s);
+  $('inputs').innerHTML=dev('Keyboard',s.inputs[0],'forget_in0','pair_in0',3,s)+dev('Mouse',s.inputs[1],'forget_in1','pair_in1',4,s);
+  $('pin').hidden=s.passkey<0;
+  if(s.passkey>=0){
+    $('pincode').textContent=String(s.passkey).padStart(6,'0');
+    $('pinfor').textContent=s.passkey_for==='keyboard'?'Type this code on the keyboard, then press Enter':'Type this PIN on the computer';
+  }
+  $('swbtn').textContent=s.learning?'Click the mouse button now…':(s.cfg.swbtn?'Mouse button '+s.cfg.swbtn:'Not set');
+  $('warn').hidden=!s.default_web_pass;
+  $('left').textContent=s.ap_left<0?'':'Switches off in about '+Math.ceil(s.ap_left/60)+' min after the last phone leaves';
+  $('foot').textContent='Uptime '+Math.floor(s.uptime/60)+' min · free memory '+Math.round(s.heap/1024)+' KB';
+  if(!loaded){
+    $('swap0').checked=!!(s.cfg.modswap&1);$('swap1').checked=!!(s.cfg.modswap&2);
+    $('prefix').value=s.cfg.prefix;$('apmin').value=s.cfg.apmin;loaded=true;
+  }
+}
+async function load(){
+  try{const r=await call('/api/status');render(await r.json());failed=0}
+  catch(e){if(++failed===3)toast('Connection lost. Rejoin the ESP-KVM-Setup Wi-Fi.')}
+}
+load();setInterval(load,1500);
+</script>
+</body>
+</html>
