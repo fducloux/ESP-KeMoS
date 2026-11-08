@@ -37,7 +37,7 @@
 #define RESET_GPIO        GPIO_NUM_0  // BOOT button (press = switch the Wi-Fi page on)
 #define LED_GPIO          GPIO_NUM_2  // on-board LED on most 38-pin boards: lit = computer 2
 #define LED1_GPIO         GPIO_NUM_25 // external LED (GPIO -> 330 ohm -> LED -> GND): lit = computer 1
-#define LED2_GPIO         GPIO_NUM_26 // external LED: lit = computer 2
+#define LED2_GPIO         GPIO_NUM_23 // external LED, other side of the board: lit = computer 2
 #define HK_RIGHT          0x4F        // right arrow: Ctrl+Shift+Right = computer 2
 #define HK_LEFT           0x50        // left arrow:  Ctrl+Shift+Left  = computer 1
 // -------------------------------------------------------------------------
