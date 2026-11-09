@@ -49,14 +49,23 @@
 
 static const char *TAG = "kvm";
 
+// Time of the last connect/disconnect/ready on any link. Link-parameter requests wait until
+// things have been quiet for a while: overlapping update procedures on several links crash the
+// BLE controller (r_lld_evt_update_create, LoadProhibited).
+static uint32_t last_link_ms;
+static int upd_tries[2];             // per computer: link-update requests sent since it connected
+static void link_event(void) { last_link_ms = esp_log_timestamp(); }
+
 typedef struct {
     uint16_t   conn;
     bool       known;            // paired before (address saved in NVS)
     ble_addr_t addr;
     bool       ready;            // discovery done, reports subscribed
     hid_desc_t desc;
-    struct { uint16_t handle; uint8_t id; } rep[MAX_REPORTS];
+    struct { uint16_t handle; uint8_t id; uint16_t cccd; } rep[MAX_REPORTS];
     int        n_rep;
+    bool       cached;           // rep[], led_handle and desc are valid for cache_addr: skip discovery
+    ble_addr_t cache_addr;
     uint16_t   led_handle;       // keyboard output report (Caps Lock LED)
     uint8_t    keys[32];         // pressed keyboard usages
     uint16_t   buttons;
@@ -156,6 +165,18 @@ static void load_state(void)
 
 kvm_cfg_t kvm_cfg;
 
+// No-sleep per computer (see below), saved in NVS "kvmcfg" key "nosleep" (bit 0 = computer 1)
+static bool nosleep[NUM_HOSTS];
+
+static void nosleep_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("kvmcfg", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "nosleep", (nosleep[0] ? 1 : 0) | (nosleep[1] ? 2 : 0));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static void cfg_defaults(void)
 {
     memset(&kvm_cfg, 0, sizeof(kvm_cfg));
@@ -182,6 +203,10 @@ void kvm_cfg_load(void)
     nvs_get_str(h, "webpass", kvm_cfg.web_pass, &n);
     nvs_get_u8(h, "modswap", &kvm_cfg.mod_swap);
     nvs_get_u8(h, "swbtn", &kvm_cfg.sw_btn);
+    uint8_t ns = 0;
+    nvs_get_u8(h, "nosleep", &ns);
+    nosleep[0] = ns & 1;
+    nosleep[1] = ns & 2;
     nvs_close(h);
 }
 
@@ -208,6 +233,7 @@ void kvm_cfg_reset(void)
         nvs_close(h);
     }
     cfg_defaults();
+    nosleep[0] = nosleep[1] = false;
 }
 
 // ================================================================ output side
@@ -216,12 +242,19 @@ static uint8_t last_keys[32];
 static uint8_t suppressed[32];   // keys swallowed by the hotkey until released
 static uint16_t last_consumer;
 
+// No-sleep: per computer, toggled with Ctrl+Shift+mouse button 4. While on, the computer gets a
+// ghost F15 key every 30 s, and its LED flashes for 100 ms every 2 s (off-flash if it is the
+// active computer, on-flash if not).
+static bool ns_flash;                // true during the 100 ms flash window
+
 // Shows the active computer: LED1 = computer 1, LED2 and the on-board LED = computer 2
 static void led_update(void)
 {
-    gpio_set_level(LED1_GPIO, active == 0);
-    gpio_set_level(LED2_GPIO, active == 1);
-    gpio_set_level(LED_GPIO, active == 1);
+    bool l1 = (active == 0) ^ (nosleep[0] && ns_flash);
+    bool l2 = (active == 1) ^ (nosleep[1] && ns_flash);
+    gpio_set_level(LED1_GPIO, l1);
+    gpio_set_level(LED2_GPIO, l2);
+    gpio_set_level(LED_GPIO, l2);
 }
 
 static bool host_ok(int h) { return host[h].conn != NONE && host[h].encrypted; }
@@ -385,6 +418,42 @@ static bool hotkey(int u, const uint8_t *keys)
     return true;
 }
 
+#define NS_BUTTON_BIT 3              // mouse button 4
+#define GHOST_KEY     0x6A           // F15: counts as activity, does nothing on Windows or macOS
+static struct ble_npl_callout ns_co;
+
+static bool ctrl_shift_down(void)
+{
+    uint8_t k[32];
+    merged_keys(k);
+    return (bm_get(k, 0xE0) || bm_get(k, 0xE4)) && (bm_get(k, 0xE1) || bm_get(k, 0xE5));
+}
+
+static void ns_tick(struct ble_npl_event *ev)
+{
+    static unsigned n;
+    n++;
+    ns_flash = (n % 20) == 0;                       // 100 ms every 2 s
+    if (n % 300 == 0 || n % 300 == 1) {             // press, then release 100 ms later
+        bool press = n % 300 == 0;
+        uint8_t keys[32];
+        merged_keys(keys);
+        for (int h = 0; h < NUM_HOSTS; h++) {
+            if (!nosleep[h] || !host_ok(h)) continue;
+            if (h == active) {                      // never disturb real typing
+                bool any = false;
+                for (int b = 0; b < 32; b++) any |= keys[b] != 0;
+                if (any) continue;
+            }
+            uint8_t rpt[8] = {0};
+            if (press) rpt[2] = GHOST_KEY;
+            hid_dev_send_keyboard(host[h].conn, rpt);
+        }
+    }
+    led_update();
+    ble_npl_callout_reset(&ns_co, ble_npl_time_ms_to_ticks32(100));
+}
+
 static void process_keys(void)
 {
     uint8_t now[32];
@@ -423,6 +492,11 @@ static void on_input_report(input_t *d, uint16_t handle, const uint8_t *data, si
             learn_btn = false;
             btn_suppress |= 1u << bit;
             ESP_LOGW(TAG, "Switch button learned: mouse button %d", bit + 1);
+        } else if ((newly >> NS_BUTTON_BIT & 1) && kvm_cfg.sw_btn != NS_BUTTON_BIT + 1 && ctrl_shift_down()) {
+            btn_suppress |= 1u << NS_BUTTON_BIT;
+            nosleep[active] = !nosleep[active];
+            nosleep_save();
+            ESP_LOGI(TAG, "No-sleep computer %d: %s", active + 1, nosleep[active] ? "on" : "off");
         } else if (kvm_cfg.sw_btn && ((newly >> (kvm_cfg.sw_btn - 1)) & 1)) {
             uint8_t k[32];
             merged_keys(k);
@@ -534,6 +608,18 @@ static int discover(input_t *d)
     int rc;
     xSemaphoreTake(gsem, 0);
 
+    // Same device as last time: the handles are still valid, only re-enable the notifications.
+    struct ble_gap_conn_desc cd;
+    if (d->cached && ble_gap_conn_find(conn, &cd) == 0 && ble_addr_cmp(&cd.peer_id_addr, &d->cache_addr) == 0) {
+        static const uint8_t on[2] = {1, 0};
+        bool ok = true;
+        for (int i = 0; i < d->n_rep && ok; i++)
+            ok = wait_gatt(ble_gattc_write_flat(conn, d->rep[i].cccd, on, 2, write_cb, NULL)) == 0;
+        if (ok) { ESP_LOGI(TAG, "Input device: using cached setup"); return 0; }
+        ESP_LOGW(TAG, "cached setup failed, full discovery");
+    }
+    d->cached = false;
+
     svc_start = svc_end = 0;
     rc = wait_gatt(ble_gattc_disc_svc_by_uuid(conn, BLE_UUID16_DECLARE(0x1812), svc_cb, NULL));
     if (rc || !svc_start) { ESP_LOGE(TAG, "no HID service (%d)", rc); return rc ? rc : -1; }
@@ -580,11 +666,16 @@ static int discover(input_t *d)
             if (rc == 0) {
                 d->rep[d->n_rep].handle = chrs[i].val;
                 d->rep[d->n_rep].id = rid;
+                d->rep[d->n_rep].cccd = cccd;
                 d->n_rep++;
             }
         } else if (type == 2 && !d->led_handle) {
             d->led_handle = chrs[i].val;
         }
+    }
+    if (d->n_rep && ble_gap_conn_find(conn, &cd) == 0) {
+        d->cache_addr = cd.peer_id_addr;
+        d->cached = true;
     }
     return d->n_rep ? 0 : -1;
 }
@@ -602,10 +693,12 @@ static void disc_task(void *arg)
             d->ready = true;
             // All four links share one radio. Put every link on the same 15 ms interval so their
             // events line up instead of colliding (mixed 7.5/15/25 ms links make input stutter).
+            // Must happen right after setup: a later request is ignored by the sleepy devices.
             struct ble_gap_upd_params up = {
                 .itvl_min = 12, .itvl_max = 12, .latency = 0, .supervision_timeout = 400,
             };
             ble_gap_update_params(d->conn, &up);
+            link_event();
             ESP_LOGI(TAG, "Input device %d ready (%d reports)", idx + 1, d->n_rep);
             forward_leds();
         } else {
@@ -649,6 +742,7 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
 
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
+        link_event();
         connecting = false;
         if (ev->connect.status == 0) {
             d->conn = ev->connect.conn_handle;
@@ -723,6 +817,7 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        link_event();
         ESP_LOGI(TAG, "Input device %d disconnected (reason 0x%x)", idx + 1, ev->disconnect.reason);
         // A failed keyboard pairing must not leave computers being asked for a PIN
         ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
@@ -845,15 +940,9 @@ static void assign_host(uint16_t conn)
     host[h].encrypted = true;
     ESP_LOGI(TAG, "Computer %d connected%s", h + 1, h == active ? " (active)" : "");
 
-    // Latency 0 so the radio never skips events (skipped events = lag after an idle spell).
-    // First ask for exactly 15 ms. upd_tick() retries with a 15-30 ms range, which is what
-    // Apple accepts (its rule: max >= min + 15 ms), if a computer ignores or collides with this.
-    struct ble_gap_upd_params up = {
-        .itvl_min = 12, .itvl_max = 12,
-        .latency = 0, .supervision_timeout = 400,
-    };
-    int urc = ble_gap_update_params(conn, &up);
-    if (urc) ESP_LOGW(TAG, "Computer %d: link update request failed (%d)", h + 1, urc);
+    // No link update request here: upd_tick() asks once things have been quiet for a while.
+    link_event();
+    upd_tries[h] = 0;
     if (h == active) send_keys();
 }
 
@@ -894,6 +983,7 @@ static int periph_cb(struct ble_gap_event *ev, void *arg)
 {
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
+        link_event();
         if (ev->connect.status == 0) {
             struct ble_gap_conn_desc cd;
             if (ble_gap_conn_find(ev->connect.conn_handle, &cd) == 0) fix_bond_type(&cd.peer_id_addr);
@@ -931,6 +1021,7 @@ static int periph_cb(struct ble_gap_event *ev, void *arg)
     }
 
     case BLE_GAP_EVENT_DISCONNECT:
+        link_event();
         for (int h = 0; h < NUM_HOSTS; h++) {
             if (host[h].conn == ev->disconnect.conn.conn_handle) {
                 host[h].conn = NONE;
@@ -1061,7 +1152,9 @@ void kvm_swap_hosts(void)
     host_t t = host[0]; host[0] = host[1]; host[1] = t;
     active = 1 - active;
     kvm_cfg.mod_swap = ((kvm_cfg.mod_swap & 1) << 1) | ((kvm_cfg.mod_swap >> 1) & 1);   // setting follows the computer
+    bool nt = nosleep[0]; nosleep[0] = nosleep[1]; nosleep[1] = nt;
     kvm_cfg_save();
+    nosleep_save();
     led_update();
     for (int i = 0; i < NUM_HOSTS; i++) {
         char key[8];
@@ -1103,24 +1196,28 @@ static struct ble_npl_callout upd_co;
 // The first request at connect time often collides with the computer's own update.
 // macOS picks the top of any range it is offered, so ask for exactly 15 ms three times; if it
 // refuses, stop trying (a link that has latency 0 is fine at up to 30 ms).
-static int upd_tries[NUM_HOSTS];
-
 static void upd_tick(struct ble_npl_event *ev)
 {
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
-    for (int h = 0; h < NUM_HOSTS; h++) {
-        struct ble_gap_conn_desc d;
-        if (!host_ok(h) || ble_gap_conn_find(host[h].conn, &d) != 0) { upd_tries[h] = 0; continue; }
-        bool fast = d.conn_latency == 0 && d.conn_itvl <= 12;
-        bool usable = d.conn_latency == 0 && d.conn_itvl <= 24;
-        if (fast || (usable && upd_tries[h] >= 3)) continue;
-        struct ble_gap_upd_params up = { .itvl_min = 12, .itvl_max = upd_tries[h] < 3 ? 12 : 24,
-                                         .latency = 0, .supervision_timeout = 400 };
-        ESP_LOGI(TAG, "Computer %d link %.2f ms lat %d -> asking %.2f ms", h + 1, d.conn_itvl * 1.25, d.conn_latency, up.itvl_min * 1.25);
-        ble_gap_update_params(host[h].conn, &up);
-        upd_tries[h]++;
+    // Wait until no link has connected, disconnected or finished setup for 2 s, then send at most
+    // ONE request per tick (computers first, then input devices).
+    if (esp_log_timestamp() - last_link_ms >= 2000) {
+        bool sent = false;
+        for (int h = 0; h < NUM_HOSTS && !sent; h++) {
+            struct ble_gap_conn_desc d;
+            if (!host_ok(h) || ble_gap_conn_find(host[h].conn, &d) != 0) { upd_tries[h] = 0; continue; }
+            bool fast = d.conn_latency == 0 && d.conn_itvl <= 12;
+            bool usable = d.conn_latency == 0 && d.conn_itvl <= 24;
+            if (fast || (usable && upd_tries[h] >= 3)) continue;
+            struct ble_gap_upd_params up = { .itvl_min = 12, .itvl_max = upd_tries[h] < 3 ? 12 : 24,
+                                             .latency = 0, .supervision_timeout = 400 };
+            ESP_LOGI(TAG, "Computer %d link %.2f ms lat %d -> asking %.2f ms", h + 1, d.conn_itvl * 1.25, d.conn_latency, up.itvl_min * 1.25);
+            ble_gap_update_params(host[h].conn, &up);
+            upd_tries[h]++;
+            sent = true;
+        }
     }
     ble_npl_callout_reset(&upd_co, ble_npl_time_ms_to_ticks32(3000));
 }
@@ -1129,6 +1226,8 @@ static void on_sync(void)
 {
     ble_npl_callout_init(&upd_co, nimble_port_get_dflt_eventq(), upd_tick, NULL);
     ble_npl_callout_reset(&upd_co, ble_npl_time_ms_to_ticks32(3000));
+    ble_npl_callout_init(&ns_co, nimble_port_get_dflt_eventq(), ns_tick, NULL);
+    ble_npl_callout_reset(&ns_co, ble_npl_time_ms_to_ticks32(100));
     ble_npl_callout_init(&mouse_co, nimble_port_get_dflt_eventq(), mouse_tick, NULL);
     ble_npl_callout_reset(&mouse_co, ble_npl_time_ms_to_ticks32(15));
     ble_hs_util_ensure_addr(0);

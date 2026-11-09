@@ -41,7 +41,7 @@ static const uint8_t report_map[] = {
     0xC0,
 };
 
-static const uint8_t hid_info[4] = {0x11, 0x01, 0x00, 0x02}; // HID 1.11, normally connectable
+static const uint8_t hid_info[4] = {0x11, 0x01, 0x21, 0x02}; // HID 1.11, country 0x21 = US, normally connectable
 static uint8_t protocol_mode = 1;                             // report protocol
 static const uint8_t battery_level[1] = {100};
 // PnP ID: vendor source USB-IF, Espressif VID 0x303A, PID 0x4004, version 1.0
