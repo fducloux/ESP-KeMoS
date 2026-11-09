@@ -9,7 +9,7 @@ Bluetooth keyboard/mouse switch, published at https://github.com/fducloux/ESP-Ke
 - **Logitech MX Keys + MX Master 3** connect to the ESP32 over BLE. The ESP32 is the central.
 - The ESP32 appears as "ESP KVM", one BLE HID keyboard+mouse, to two computers. Today computer 1 is the **MacBook** and computer 2 is **Windows 11** (the page has a Swap button, so check `host[]` rather than assuming).
 - **Ctrl+Shift+Left/Right Arrow** switches to computer 1/2. Ctrl+Shift+click of a learned mouse button (MX Master "button 5"; the thumb button is invisible to the ESP32) toggles. Per-computer Alt/Command swap on the web page.
-- **No-sleep** per computer: Ctrl+Shift+mouse button 4 toggles it for the active computer (saved in NVS `kvmcfg` key `nosleep`). While on, a ghost F15 key goes to that computer every 30 s, and its LED flashes for 100 ms every 2 s.
+- **No-sleep** per computer: Ctrl+Shift+mouse button 4 toggles it for the active computer (saved in NVS `kvmcfg` key `nosleep`). While on, a ghost F18 key goes to that computer every 30 s, and its LED flashes for 100 ms every 2 s.
 - LEDs: GPIO 25 = computer 1, GPIO 23 = computer 2, on-board GPIO 2 = computer 2 (330 ohm resistors).
 
 ## Owner preferences (fducloux)

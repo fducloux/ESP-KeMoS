@@ -419,7 +419,7 @@ static bool hotkey(int u, const uint8_t *keys)
 }
 
 #define NS_BUTTON_BIT 3              // mouse button 4
-#define GHOST_KEY     0x6A           // F15: counts as activity, does nothing on Windows or macOS
+#define GHOST_KEY     0x6D           // F18: counts as activity, no default action on Windows or macOS (F14/F15 change brightness on a Mac)
 static struct ble_npl_callout ns_co;
 
 static bool ctrl_shift_down(void)
@@ -1201,9 +1201,10 @@ static void upd_tick(struct ble_npl_event *ev)
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
-    // Wait until no link has connected, disconnected or finished setup for 2 s, then send at most
-    // ONE request per tick (computers first, then input devices).
-    if (esp_log_timestamp() - last_link_ms >= 2000) {
+    // Wait until no link has connected, disconnected or finished setup for 10 s (Windows changes
+    // its own link timing a few seconds after connecting; an update on the other link at the same
+    // time crashes the controller), then send at most ONE request per tick.
+    if (esp_log_timestamp() - last_link_ms >= 10000) {
         bool sent = false;
         for (int h = 0; h < NUM_HOSTS && !sent; h++) {
             struct ble_gap_conn_desc d;
