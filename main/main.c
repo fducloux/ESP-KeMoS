@@ -419,7 +419,7 @@ static bool hotkey(int u, const uint8_t *keys)
 }
 
 #define NS_BUTTON_BIT 3              // mouse button 4
-#define GHOST_KEY     0x6D           // F18: counts as activity, no default action on Windows or macOS (F14/F15 change brightness on a Mac)
+#define GHOST_MOD     0x02           // Left Shift tap: counts as activity and types nothing (F13-F18 get printed by terminals)
 static struct ble_npl_callout ns_co;
 
 static bool ctrl_shift_down(void)
@@ -446,7 +446,7 @@ static void ns_tick(struct ble_npl_event *ev)
                 if (any) continue;
             }
             uint8_t rpt[8] = {0};
-            if (press) rpt[2] = GHOST_KEY;
+            if (press) rpt[0] = GHOST_MOD;
             hid_dev_send_keyboard(host[h].conn, rpt);
         }
     }
