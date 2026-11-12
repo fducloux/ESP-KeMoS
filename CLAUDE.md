@@ -12,6 +12,16 @@ Bluetooth keyboard/mouse switch, published at https://github.com/fducloux/ESP-Ke
 - **No-sleep** per computer: Ctrl+Shift+mouse button 4 toggles it for the active computer (saved in NVS `kvmcfg` key `nosleep`). While on, a ghost Left Shift tap goes to that computer every 30 s, and its LED flashes for 100 ms every 2 s.
 - LEDs: GPIO 25 = computer 1, GPIO 23 = computer 2, on-board GPIO 2 = computer 2 (330 ohm resistors).
 
+## Two-board mode (branch `two-board`, 2026-11-12): the Mac gets its own ESP32
+Why: macOS gives a 7.5 ms link only to the mouse appearance `0x03C2`, but one ESP32 controller crashes with two computers on fast links (see "Link timing"). So the Mac is served by a second board, the **pad** (`experiments/pad/`), and the **hub** (`main/`) keeps the MX Keys/MX Master and one direct computer (Windows).
+- Pad: peripheral only, advertises appearance `0x03C2`, reuses `main/hid_dev.c`. Link ends at `7.50 ms lat 0` (asks once for latency 0 after 8 s). Holds one known computer (address in NVS `pad`/`peer`), refuses others. Hub's Pair button for computer 1 sends the pad a pairing window (120 s); pad's BOOT button does the same. Blue LED lit = linked.
+- Hub: `REMOTE_HOST 0` (computer 1 = Mac) is reached over UART1, `DIRECT_HOST 1` (computer 2) stays a normal BLE link with the pair-merged mouse. Mouse reports to the pad go 1:1 (no merge): the Mac feels like a direct connection. Swap computers is disabled in this mode. Pad heartbeat every 0.5 s, hub marks it offline after 3.5 s.
+- UART 460800 baud, frame `0xA5 | type | len | payload | xor`. Hub to pad: 1 keyboard(8), 2 mouse(7), 3 consumer(2), 5 pair, 6 forget. Pad to hub: 0x81 LEDs, 0x82 status {linked, known, pairing open}.
+- Wiring (both boards): GPIO17 (TX2/G17) to the other board's GPIO16 (RX2/G16), crossed, plus GND. Never use RX0/TX0 (USB serial). Each board on its own USB data cable while developing; one charger later.
+- Setup: flash the hub (`idf.py flash` in the repo) and the pad (`experiments/pad`), join `ESP-KVM-Setup` (`espkvm-setup`), open 192.168.4.1 (admin / `admin1234`), pair MX Keys and MX Master, press Pair computer 1 and pair "ESP KVM" on the Mac (forget old entries first), then Pair computer 2 for Windows. Turn on Alt/Command swap for computer 1 on the page (a wiped board starts with it off).
+- Result on 2026-11-12: Mac pointer "0 lag, 0 latency", no controller crash in 30+ minutes with Mac pad, mouse and keyboard. Windows on the hub not tested yet.
+- The test hub board is MAC `b4:bf:e9:60:8d:94`, the pad `d8:bc:38:fd:48:f0`. The board with `b4:bf:e9:61:d4:18` runs tag `Stable` (single board) and is the daily driver: do not flash it without being asked.
+
 ## Owner preferences (fducloux)
 - No cables to the computers: everything must be BLE. No software on the computers (one is a locked-down corporate laptop; Logi Flow was rejected for that reason).
 - One ESP32 board only. The 38-pin ESP32S boards are what's on hand (no S3).
