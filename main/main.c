@@ -34,7 +34,7 @@
 #include "kvm.h"
 
 // ---------------------------------------------------------------- settings
-#define DEVICE_NAME       "ESP KVM"   // name the computers see
+#define DEVICE_NAME       "ESP KVM Win"   // name the computers see
 #define RESET_GPIO        GPIO_NUM_0  // BOOT button (press = switch the Wi-Fi page on)
 #define LED_GPIO          GPIO_NUM_2  // on-board LED on most 38-pin boards: lit = computer 2
 #define LED1_GPIO         GPIO_NUM_25 // external LED (GPIO -> 330 ohm -> LED -> GND): lit = computer 1
@@ -1134,6 +1134,7 @@ static void start_adv(void)
     };
     int rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &p, periph_cb, NULL);
     if (rc && rc != BLE_HS_EALREADY) ESP_LOGW(TAG, "adv start rc=%d", rc);
+    else if (!rc) ESP_LOGI(TAG, "Advertising as \"%s\"", DEVICE_NAME);
 }
 
 // ================================================================ actions for the web page
@@ -1175,10 +1176,16 @@ bool kvm_pair(int target)
     if (target < PAIR_HOST0 || target > PAIR_IN1) return false;
     bool known = target == PAIR_HOST0 ? host_known(0) : target == PAIR_HOST1 ? host_known(1)
                : target == PAIR_IN0 ? in[0].known : in[1].known;
+    ESP_LOGI(TAG, "Pair request %d: %s", target, known ? "refused, already paired (forget it first)" : "window open");
     if (known) return false;                      // forget it first
     pair_target = target;
     pair_deadline = esp_timer_get_time() + (int64_t)PAIR_SECONDS * 1000000;
     if (target == PAIR_HOST0 + REMOTE_HOST) pad_send(PT_PAIR, NULL, 0);     // the pad opens its own pairing window
+    if (target == PAIR_HOST0 + DIRECT_HOST) {      // make sure the computer can find us: restart advertising
+        ESP_LOGI(TAG, "Advertising was %s: restarting it", ble_gap_adv_active() ? "on" : "OFF");
+        ble_gap_adv_stop();
+        start_adv();
+    }
     start_scan();
     return true;
 }
