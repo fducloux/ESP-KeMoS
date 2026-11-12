@@ -23,6 +23,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -83,6 +84,18 @@ typedef struct {
 
 static input_t in[NUM_INPUTS];
 static host_t  host[NUM_HOSTS];
+
+// ---- Two-board mode: computer REMOTE_HOST is reached through a second ESP32 (the "pad", see
+// experiments/pad) over a UART. The pad is that computer's own Bluetooth keyboard+mouse, so this
+// board only has ONE computer link. UART wiring: hub TX GPIO17 -> pad RX GPIO16, hub RX GPIO16 <- pad TX GPIO17, GND.
+#define REMOTE_HOST   0
+#define DIRECT_HOST   (1 - REMOTE_HOST)
+#define PAD_UART      UART_NUM_1
+#define PAD_TX_GPIO   17
+#define PAD_RX_GPIO   16
+#define PAD_BAUD      460800
+static struct { volatile bool ok, known, pair_open; volatile uint32_t seen_ms; } pad;
+enum { PT_KBD = 1, PT_MOUSE = 2, PT_CONS = 3, PT_PAIR = 5, PT_FORGET = 6, PT_LEDS = 0x81, PT_STATUS = 0x82 };
 static int     active;
 static uint8_t own_addr_type;
 static bool    connecting;
@@ -258,7 +271,28 @@ static void led_update(void)
     gpio_set_level(LED_GPIO, l2);
 }
 
-static bool host_ok(int h) { return host[h].conn != NONE && host[h].encrypted; }
+static bool host_ok(int h)
+{
+    if (h == REMOTE_HOST) return pad.ok;
+    return host[h].conn != NONE && host[h].encrypted;
+}
+static bool host_known(int h) { return h == REMOTE_HOST ? pad.known : host[h].known; }
+
+static void pad_send(uint8_t type, const uint8_t *p, uint8_t n)
+{
+    uint8_t f[20], chk = type ^ n;
+    f[0] = 0xA5; f[1] = type; f[2] = n;
+    for (int i = 0; i < n; i++) { f[3 + i] = p[i]; chk ^= p[i]; }
+    f[3 + n] = chk;
+    uart_write_bytes(PAD_UART, f, 4 + n);
+}
+static void out_kbd(int h, const uint8_t r[8])   { if (h == REMOTE_HOST) pad_send(PT_KBD, r, 8);   else hid_dev_send_keyboard(host[h].conn, r); }
+static void out_mouse(int h, const uint8_t r[7]) { if (h == REMOTE_HOST) pad_send(PT_MOUSE, r, 7); else hid_dev_send_mouse(host[h].conn, r); }
+static void out_cons(int h, uint16_t c)
+{
+    uint8_t r[2] = {c & 0xFF, c >> 8};
+    if (h == REMOTE_HOST) pad_send(PT_CONS, r, 2); else hid_dev_send_consumer(host[h].conn, c);
+}
 
 static void merged_keys(uint8_t out[32])
 {
@@ -292,7 +326,7 @@ static void send_keys(void)
     uint8_t keys[32], rpt[8];
     merged_keys(keys);
     build_kbd_report(keys, rpt);
-    hid_dev_send_keyboard(host[active].conn, rpt);
+    out_kbd(active, rpt);
 }
 
 static uint16_t btn_suppress;        // buttons swallowed by the computer-switch click until released
@@ -339,7 +373,7 @@ static void mouse_flush(void)
         (uint8_t)(int8_t)w,
         (uint8_t)(int8_t)p,
     };
-    hid_dev_send_mouse(host[active].conn, r);
+    out_mouse(active, r);
     dbg_tx++;
     sent_buttons = b;
 }
@@ -366,6 +400,7 @@ static void send_mouse(int32_t x, int32_t y, int32_t wheel, int32_t pan)
     // The mouse sends ~110 reports/s, a 15 ms computer link takes ~66/s. Sending all of them queues
     // up (laggy pointer); merging by elapsed time gives uneven step sizes (macOS acceleration
     // pumps). So merge in fixed pairs: every 2nd report goes out carrying both, ~55/s, evenly.
+    if (active == REMOTE_HOST) { mouse_flush(); return; }       // the pad's link is 7.5 ms: forward every report 1:1
     if (!pend_n) pend_ms = esp_log_timestamp();
     pend_n++;
     if (pend_n >= 2 || merged_buttons() != sent_buttons) mouse_flush();
@@ -377,7 +412,7 @@ static void send_consumer_if_changed(void)
     for (int i = 0; i < NUM_INPUTS && !c; i++) if (in[i].ready) c = in[i].consumer;
     if (c == last_consumer) return;
     last_consumer = c;
-    if (host_ok(active)) hid_dev_send_consumer(host[active].conn, c);
+    if (host_ok(active)) out_cons(active, c);
 }
 
 static void forward_leds(void)
@@ -403,9 +438,9 @@ static void switch_to(int target)
     if (host_ok(active)) {                       // let go of everything on the old computer
         static const uint8_t kz[8] = {0};
         static const uint8_t mz[7] = {0};
-        hid_dev_send_keyboard(host[active].conn, kz);
-        hid_dev_send_mouse(host[active].conn, mz);
-        hid_dev_send_consumer(host[active].conn, 0);
+        out_kbd(active, kz);
+        out_mouse(active, mz);
+        out_cons(active, 0);
     }
     active = target;
     last_consumer = 0;
@@ -417,7 +452,7 @@ static void switch_to(int target)
     send_keys();
     forward_leds();
     struct ble_gap_conn_desc cd;                  // for lag diagnosis: how fast is the new computer's link?
-    if (host_ok(active) && ble_gap_conn_find(host[active].conn, &cd) == 0)
+    if (active != REMOTE_HOST && host_ok(active) && ble_gap_conn_find(host[active].conn, &cd) == 0)
         ESP_LOGI(TAG, "Computer %d link %.2f ms lat %d", active + 1, cd.conn_itvl * 1.25, cd.conn_latency);
 }
 
@@ -468,7 +503,7 @@ static void ns_tick(struct ble_npl_event *ev)
             }
             uint8_t rpt[8] = {0};
             if (press) rpt[0] = GHOST_MOD;
-            hid_dev_send_keyboard(host[h].conn, rpt);
+            out_kbd(h, rpt);
         }
     }
     led_update();
@@ -943,9 +978,9 @@ static void assign_host(uint16_t conn)
 
     int h = -1;
     for (int i = 0; i < NUM_HOSTS; i++)
-        if (host[i].known && memcmp(host[i].id.val, desc.peer_id_addr.val, 6) == 0) h = i;   // bytes only: macOS flips the address type
+        if (i != REMOTE_HOST && host[i].known && memcmp(host[i].id.val, desc.peer_id_addr.val, 6) == 0) h = i;   // bytes only: macOS flips the address type
     if (h < 0) {                                  // a computer we do not know
-        int t = pairing_on(PAIR_HOST0) ? 0 : pairing_on(PAIR_HOST1) ? 1 : -1;
+        int t = pairing_on(PAIR_HOST0 + DIRECT_HOST) ? DIRECT_HOST : -1;
         if (t < 0 || host[t].known) {
             ESP_LOGW(TAG, "Unknown computer refused: press Pair for a computer on the setup page first");
             delete_peer_both(&desc.peer_id_addr);
@@ -1066,8 +1101,8 @@ static int periph_cb(struct ble_gap_event *ev, void *arg)
 static void start_adv(void)
 {
     int connected = 0;
-    for (int h = 0; h < NUM_HOSTS; h++) if (host[h].conn != NONE) connected++;
-    if (connected >= NUM_HOSTS || ble_gap_adv_active()) return;
+    if (host[DIRECT_HOST].conn != NONE) connected++;
+    if (connected >= 1 || ble_gap_adv_active()) return;          // one direct computer only
 
     static const ble_uuid16_t hid_uuid = BLE_UUID16_INIT(0x1812);
     struct ble_hs_adv_fields f = {0};
@@ -1112,7 +1147,7 @@ void kvm_get_status(kvm_status_t *s)
     s->passkey = g_passkey;
     strlcpy(s->passkey_for, g_passkey_for, sizeof(s->passkey_for));
     for (int i = 0; i < NUM_HOSTS; i++) {
-        s->host[i].known = host[i].known;
+        s->host[i].known = host_known(i);
         s->host[i].connected = host_ok(i);
         s->host[i].ready = host_ok(i);
         if (host[i].known) addr_str(&host[i].id, s->host[i].addr);
@@ -1129,11 +1164,12 @@ bool kvm_pair(int target)
 {
     if (target == PAIR_NONE) { pair_target = PAIR_NONE; start_scan(); return true; }
     if (target < PAIR_HOST0 || target > PAIR_IN1) return false;
-    bool known = target == PAIR_HOST0 ? host[0].known : target == PAIR_HOST1 ? host[1].known
+    bool known = target == PAIR_HOST0 ? host_known(0) : target == PAIR_HOST1 ? host_known(1)
                : target == PAIR_IN0 ? in[0].known : in[1].known;
     if (known) return false;                      // forget it first
     pair_target = target;
     pair_deadline = esp_timer_get_time() + (int64_t)PAIR_SECONDS * 1000000;
+    if (target == PAIR_HOST0 + REMOTE_HOST) pad_send(PT_PAIR, NULL, 0);     // the pad opens its own pairing window
     start_scan();
     return true;
 }
@@ -1161,6 +1197,7 @@ static void kvm_nvs_erase(const char *key)
 void kvm_forget_host(int h)
 {
     if (h < 0 || h >= NUM_HOSTS) return;
+    if (h == REMOTE_HOST) { pad_send(PT_FORGET, NULL, 0); pad.known = false; ESP_LOGW(TAG, "Computer %d (pad) forgotten", h + 1); return; }
     char key[8];
     snprintf(key, sizeof(key), "host%d", h);
     if (host[h].known) delete_peer_both(&host[h].id);
@@ -1173,6 +1210,8 @@ void kvm_forget_host(int h)
 // Swap which computer is "1" and which is "2" (no re-pairing). The same physical computer stays active.
 void kvm_swap_hosts(void)
 {
+    ESP_LOGW(TAG, "Swap is not available in two-board mode");
+    return;
     host_t t = host[0]; host[0] = host[1]; host[1] = t;
     active = 1 - active;
     kvm_cfg.mod_swap = ((kvm_cfg.mod_swap & 1) << 1) | ((kvm_cfg.mod_swap >> 1) & 1);   // setting follows the computer
@@ -1203,6 +1242,7 @@ void kvm_forget_input(int i)
 
 void kvm_forget_all(void)
 {
+    pad_send(PT_FORGET, NULL, 0);
     for (int h = 0; h < NUM_HOSTS; h++)
         if (host[h].conn != NONE) ble_gap_terminate(host[h].conn, BLE_ERR_REM_USER_CONN_TERM);
     for (int i = 0; i < NUM_INPUTS; i++)
@@ -1222,6 +1262,7 @@ static struct ble_npl_callout upd_co;
 // refuses, stop trying (a link that has latency 0 is fine at up to 30 ms).
 static void upd_tick(struct ble_npl_event *ev)
 {
+    if (pad.ok && esp_log_timestamp() - pad.seen_ms > 3500) { pad.ok = false; ESP_LOGW(TAG, "Pad: no heartbeat, marked offline"); }
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
@@ -1288,6 +1329,46 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+static void pad_handle(uint8_t type, const uint8_t *b, int n)
+{
+    if (type == PT_STATUS && n >= 3) {
+        bool ok = b[0], known = b[1];
+        if (ok != pad.ok) ESP_LOGI(TAG, "Pad: computer link %s", ok ? "up" : "down");
+        pad.ok = ok; pad.known = known; pad.pair_open = b[2];
+        pad.seen_ms = esp_log_timestamp();
+        if (known && pair_target == PAIR_HOST0 + REMOTE_HOST) pair_target = PAIR_NONE;
+    } else if (type == PT_LEDS && n >= 1) {
+        host[REMOTE_HOST].leds = b[0];
+        if (active == REMOTE_HOST) forward_leds();
+    }
+}
+
+static void pad_rx_task(void *arg)
+{
+    uint8_t b, buf[20], type = 0, chk = 0;
+    int st = 0, len = 0, i = 0;
+    for (;;) {
+        if (uart_read_bytes(PAD_UART, &b, 1, portMAX_DELAY) != 1) continue;
+        switch (st) {
+        case 0: if (b == 0xA5) st = 1; break;
+        case 1: type = b; chk = b; st = 2; break;
+        case 2: len = b; chk ^= b; i = 0; st = len > 16 ? 0 : len ? 3 : 4; break;
+        case 3: buf[i++] = b; chk ^= b; if (i >= len) st = 4; break;
+        case 4: if (b == chk) pad_handle(type, buf, len); st = 0; break;
+        }
+    }
+}
+
+static void pad_init(void)
+{
+    uart_config_t c = { .baud_rate = PAD_BAUD, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
+                        .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE };
+    ESP_ERROR_CHECK(uart_driver_install(PAD_UART, 1024, 1024, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(PAD_UART, &c));
+    ESP_ERROR_CHECK(uart_set_pin(PAD_UART, PAD_TX_GPIO, PAD_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    xTaskCreate(pad_rx_task, "pad_rx", 3072, NULL, 6, NULL);
+}
+
 void app_main(void)
 {
     gpio_config_t io = {
@@ -1317,6 +1398,7 @@ void app_main(void)
     esp_log_level_set("BLE_INIT", ESP_LOG_WARN);
     kvm_cfg_load();
     load_state();
+    pad_init();
     disc_q = xQueueCreate(4, sizeof(int));
     gsem = xSemaphoreCreateBinary();
     xTaskCreate(disc_task, "hid_disc", 6144, NULL, 5, NULL);
