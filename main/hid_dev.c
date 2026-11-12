@@ -184,7 +184,21 @@ static void notify(uint16_t conn, uint16_t handle, const void *data, size_t len)
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) return;
     int rc = ble_gatts_notify_custom(conn, handle, om);
-    if (rc) ESP_LOGD(TAG, "notify rc=%d", rc);
+    static uint32_t fails, last_ms, sent;
+    sent++;
+    if (rc) fails++;
+    uint32_t now = esp_log_timestamp();
+    if (fails && now - last_ms >= 2000) {         // diagnosis: Mac-only lag
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(conn, &d) == 0)
+            ESP_LOGW(TAG, "notify: %u failed of %u in 2 s (last rc=%d), link %.2f ms lat %d", (unsigned)fails, (unsigned)sent, rc,
+                     d.conn_itvl * 1.25, d.conn_latency);
+        fails = sent = 0;
+        last_ms = now;
+    } else if (now - last_ms >= 2000) {
+        fails = sent = 0;
+        last_ms = now;
+    }
 }
 
 void hid_dev_send_keyboard(uint16_t conn, const uint8_t rpt[8]) { notify(conn, h_kbd_in, rpt, 8); }

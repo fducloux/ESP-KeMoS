@@ -70,6 +70,7 @@ typedef struct {
     uint8_t    keys[32];         // pressed keyboard usages
     uint16_t   buttons;
     uint16_t   consumer;
+    uint32_t   last_rx_ms;       // for disconnect diagnosis
 } input_t;
 
 typedef struct {
@@ -315,6 +316,7 @@ static int32_t acc_x, acc_y, acc_w, acc_p;
 static uint16_t sent_buttons;
 static struct ble_npl_callout mouse_co;
 
+static uint32_t dbg_rx, dbg_tx, dbg_pmin = 999, dbg_pmax;           // diagnosis: mouse reports in / out per 3 s
 static void mouse_flush(void)
 {
     uint16_t b = merged_buttons();
@@ -335,13 +337,24 @@ static void mouse_flush(void)
         (uint8_t)(int8_t)p,
     };
     hid_dev_send_mouse(host[active].conn, r);
+    dbg_tx++;
     sent_buttons = b;
 }
 
 static void mouse_tick(struct ble_npl_event *ev)
 {
+    // Fixed 15 ms grid: re-arming "15 ms after this run" gives 15 ms + handler delay, which beats
+    // against the computer's 15 ms connection events (pointer speeds up and slows down).
+    static uint32_t due;
+    uint32_t now = esp_log_timestamp();
+    static uint32_t prev;
+    if (prev) { uint32_t pd = now - prev; if (pd < dbg_pmin) dbg_pmin = pd; if (pd > dbg_pmax) dbg_pmax = pd; }
+    prev = now;
     mouse_flush();
-    ble_npl_callout_reset(&mouse_co, ble_npl_time_ms_to_ticks32(15));
+    due += 15;
+    int32_t wait = (int32_t)(due - now);
+    if (wait < 1 || wait > 30) { due = now + 15; wait = 15; }   // first run or a long stall: resync
+    ble_npl_callout_reset(&mouse_co, ble_npl_time_ms_to_ticks32(wait));
 }
 
 static void send_mouse(int32_t x, int32_t y, int32_t wheel, int32_t pan)
@@ -471,6 +484,8 @@ static void process_keys(void)
 
 static void on_input_report(input_t *d, uint16_t handle, const uint8_t *data, size_t len)
 {
+    if (d == &in[1]) dbg_rx++;
+    d->last_rx_ms = esp_log_timestamp();
     int id = -1;
     for (int i = 0; i < d->n_rep; i++) if (d->rep[i].handle == handle) id = d->rep[i].id;
     if (id < 0) return;
@@ -675,7 +690,7 @@ static int discover(input_t *d)
     }
     if (d->n_rep && ble_gap_conn_find(conn, &cd) == 0) {
         d->cache_addr = cd.peer_id_addr;
-        d->cached = true;
+        d->cached = false;   // cache disabled: instant setup overlapped the mouse's own link update (controller crash)
     }
     return d->n_rep ? 0 : -1;
 }
@@ -691,13 +706,8 @@ static void disc_task(void *arg)
             memset(d->keys, 0, sizeof(d->keys));
             d->buttons = d->consumer = 0;
             d->ready = true;
-            // All four links share one radio. Put every link on the same 15 ms interval so their
-            // events line up instead of colliding (mixed 7.5/15/25 ms links make input stutter).
-            // Must happen right after setup: a later request is ignored by the sleepy devices.
-            struct ble_gap_upd_params up = {
-                .itvl_min = 12, .itvl_max = 12, .latency = 0, .supervision_timeout = 400,
-            };
-            ble_gap_update_params(d->conn, &up);
+            // No link update request here: the devices pick their own power-save timing anyway, and an
+            // update procedure overlapping the computers' updates crashes the controller.
             link_event();
             ESP_LOGI(TAG, "Input device %d ready (%d reports)", idx + 1, d->n_rep);
             forward_leds();
@@ -818,7 +828,10 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         link_event();
-        ESP_LOGI(TAG, "Input device %d disconnected (reason 0x%x)", idx + 1, ev->disconnect.reason);
+        ESP_LOGI(TAG, "Input device %d disconnected (reason 0x%x) link %.2f ms lat %d timeout %d ms, last report %u ms ago",
+                 idx + 1, ev->disconnect.reason, ev->disconnect.conn.conn_itvl * 1.25,
+                 ev->disconnect.conn.conn_latency, ev->disconnect.conn.supervision_timeout * 10,
+                 (unsigned)(esp_log_timestamp() - d->last_rx_ms));
         // A failed keyboard pairing must not leave computers being asked for a PIN
         ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
         passkey_clear();
@@ -894,6 +907,9 @@ static int scan_cb(struct ble_gap_event *ev, void *arg)
 
 static void start_scan(void)
 {
+    // Let the computers finish their own link changes after boot first: setting up all four links
+    // at once crashes the controller (r_lld_evt_update_create). upd_tick() retries after this.
+    if (esp_log_timestamp() < 15000) return;
     if (connecting) return;
     bool need = false;
     // Scan to bring back known devices, or to find a new one while its Pair button is active
@@ -1201,6 +1217,23 @@ static void upd_tick(struct ble_npl_event *ev)
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
+    else start_scan();                                   // no-op unless a known device is missing
+    if (dbg_rx || dbg_tx) {
+        struct ble_gap_conn_desc md;
+        if (in[1].conn != NONE && ble_gap_conn_find(in[1].conn, &md) == 0)
+            ESP_LOGI(TAG, "mouse in %u out %u (3 s), mouse link %.2f ms lat %d, tick %u..%u ms", (unsigned)dbg_rx, (unsigned)dbg_tx,
+                     md.conn_itvl * 1.25, md.conn_latency, (unsigned)dbg_pmin, (unsigned)dbg_pmax);
+        dbg_rx = dbg_tx = 0; dbg_pmin = 999; dbg_pmax = 0;
+    }
+    for (int h = 0; h < NUM_HOSTS; h++) {                // diagnosis: log every change of a computer's link
+        static int lastv[NUM_HOSTS][2];
+        struct ble_gap_conn_desc cd;
+        if (!host_ok(h) || ble_gap_conn_find(host[h].conn, &cd) != 0) { lastv[h][0] = 0; continue; }
+        if (cd.conn_itvl != lastv[h][0] || cd.conn_latency != lastv[h][1]) {
+            lastv[h][0] = cd.conn_itvl; lastv[h][1] = cd.conn_latency;
+            ESP_LOGI(TAG, "Computer %d link now %.2f ms lat %d", h + 1, cd.conn_itvl * 1.25, cd.conn_latency);
+        }
+    }
     // Wait until no link has connected, disconnected or finished setup for 10 s (Windows changes
     // its own link timing a few seconds after connecting; an update on the other link at the same
     // time crashes the controller), then send at most ONE request per tick.

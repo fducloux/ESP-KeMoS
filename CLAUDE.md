@@ -9,7 +9,7 @@ Bluetooth keyboard/mouse switch, published at https://github.com/fducloux/ESP-Ke
 - **Logitech MX Keys + MX Master 3** connect to the ESP32 over BLE. The ESP32 is the central.
 - The ESP32 appears as "ESP KVM", one BLE HID keyboard+mouse, to two computers. Today computer 1 is the **MacBook** and computer 2 is **Windows 11** (the page has a Swap button, so check `host[]` rather than assuming).
 - **Ctrl+Shift+Left/Right Arrow** switches to computer 1/2. Ctrl+Shift+click of a learned mouse button (MX Master "button 5"; the thumb button is invisible to the ESP32) toggles. Per-computer Alt/Command swap on the web page.
-- **No-sleep** per computer: Ctrl+Shift+mouse button 4 toggles it for the active computer (saved in NVS `kvmcfg` key `nosleep`). While on, a ghost F18 key goes to that computer every 30 s, and its LED flashes for 100 ms every 2 s.
+- **No-sleep** per computer: Ctrl+Shift+mouse button 4 toggles it for the active computer (saved in NVS `kvmcfg` key `nosleep`). While on, a ghost Left Shift tap goes to that computer every 30 s, and its LED flashes for 100 ms every 2 s.
 - LEDs: GPIO 25 = computer 1, GPIO 23 = computer 2, on-board GPIO 2 = computer 2 (330 ohm resistors).
 
 ## Owner preferences (fducloux)
@@ -46,8 +46,11 @@ Bluetooth keyboard/mouse switch, published at https://github.com/fducloux/ESP-Ke
 - 7.5 ms active links plus a 50 to 60 ms idle computer: repeated `LoadProhibited` BLE controller crashes right after the computers connect (same backtrace), then a reboot loop.
 - Mouse flush tick of 8 ms: floods the Mac link, one batch per 15 ms event, massive lag. Keep 15 ms.
 - Spoofing an Apple Magic Mouse (PnP ID 0x05AC/0x0269 and name): Mac loads Apple's driver and ignores our input; Windows dropped to 15 ms. Reverted.
-- Link-update requests are sent only from `upd_tick` for the computers (one per tick, 2 s after the last connect or disconnect): overlapping updates crashed the controller in `r_lld_evt_update_create`. Input devices still get their 15 ms request right after setup, because a later request is ignored. Input GATT handles are cached per device (`cached` in `input_t`) to speed up reconnects.
+- Link-update requests are sent only from `upd_tick` for the computers (one per tick, 2 s after the last connect or disconnect): overlapping updates crashed the controller in `r_lld_evt_update_create`. Input devices get no update request (removed 2026-11-12). The per-device GATT handle cache (`cached` in `input_t`) is disabled.
 - The Mac connects with latency 22; `upd_tick` (every 3 s) fixes it within about 10 s.
+- 2026-11-12: every controller crash (`r_lld_evt_update_create`) is a connection-update procedure overlapping another link's setup. Do not set a 6 s supervision timeout (crash loop). Rejecting the mouse's own update requests did nothing. Input scanning starts 15 s after boot so the computers settle first. No update request to the mouse at ready (it ends at 7.5 ms lat 44 anyway). The `c86be9b` baseline also crashes at boot.
+- Mouse drops (`0x208`, supervision timeout) are the MX Master sleeping at lat 44; reconnects work. `encryption failed (7)` is ENOTCONN (link lost mid-handshake), not a bad bond: never delete bonds on it.
+- Mouse tick runs on a fixed 15 ms grid (re-arming 15 ms after each run beat against the Mac's 15 ms events: pointer sped up and slowed down). Log shows `mouse in/out` per 3 s and the tick min..max.
 - Faster boards (nRF52840) will not help: the limit is macOS, not the ESP32.
 
 ## Dev workflow
