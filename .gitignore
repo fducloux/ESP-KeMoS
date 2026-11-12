@@ -2,3 +2,5 @@ build/
 log/
 sdkconfig
 sdkconfig.old
+managed_components/
+padfw.blob

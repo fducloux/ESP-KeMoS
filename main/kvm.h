@@ -50,5 +50,11 @@ void kvm_swap_hosts(void);
 void kvm_forget_input(int i);
 void kvm_forget_all(void);
 
+// ---- padflash.c: the hub flashes the pad over a serial link
+bool kvm_pad_alive(void);       // main.c: pad heartbeat seen in the last 3.5 s
+bool kvm_pad_pair_open(void);   // main.c: the pad reports its pairing window open
+bool padflash_start(void);      // false if one is already running
+void padflash_init(void);       // typing F on the USB console starts it
+
 // ---- web.c: Wi-Fi access point + settings page
 void web_start(void);

@@ -74,6 +74,7 @@ input,select{font:inherit;width:100%;padding:10px;border:1px solid var(--line);b
 <h2>Maintenance</h2>
 <div class="card">
   <div class="row"><span>Switch this Wi-Fi page off now<br><span class="sub" id="left"></span></span><button onclick="act('ap_off','Switch the Wi-Fi page off? Press BOOT on the board to bring it back.')">Off</button></div>
+  <div class="row"><span>Update the pad<br><span class="sub">Hub writes its stored pad firmware to the second board over the wires (about 1 minute, the Mac link drops)</span></span><button onclick="act('update_pad','Update the pad firmware now? The Mac keyboard and mouse stop for about a minute.')">Update</button></div>
   <div class="row"><span>Reboot the board</span><button onclick="act('reboot','Reboot now?')">Reboot</button></div>
   <div class="row"><span>Reset settings to defaults<br><span class="sub">Keeps pairings</span></span><button class="dng" onclick="act('reset_settings','Reset all settings (including both passwords) to defaults?')">Reset</button></div>
   <div class="row"><span>Wipe all pairings<br><span class="sub">Computers and keyboard/mouse</span></span><button class="dng" onclick="act('wipe','Forget both computers AND the keyboard and mouse?')">Wipe</button></div>

@@ -141,6 +141,7 @@ static esp_err_t action_post(httpd_req_t *req)
     else if (!strcmp(name, "wipe"))            { kvm_forget_all(); restart_soon(); }
     else if (!strcmp(name, "reset_settings"))  { kvm_cfg_reset(); restart_soon(); }
     else if (!strcmp(name, "reboot"))          restart_soon();
+    else if (!strcmp(name, "update_pad"))      { if (!padflash_start()) return bad(req, "Already running"); }
     else if (!strcmp(name, "ap_off"))          stop_req = true;
     else return bad(req, "unknown action");
 

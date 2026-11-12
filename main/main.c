@@ -285,6 +285,8 @@ static bool host_ok(int h)
     if (h == REMOTE_HOST) return pad.ok;
     return host[h].conn != NONE && host[h].encrypted;
 }
+bool kvm_pad_alive(void) { return pad.ok; }
+bool kvm_pad_pair_open(void) { return pad.pair_open; }
 static bool host_known(int h) { return h == REMOTE_HOST ? pad.known : host[h].known; }
 
 static void pad_send(uint8_t type, const uint8_t *p, uint8_t n)
@@ -1439,4 +1441,5 @@ void app_main(void)
 
     nimble_port_freertos_init(host_task);
     web_start();
+    padflash_init();
 }
