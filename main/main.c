@@ -1354,6 +1354,10 @@ static void pad_handle(uint8_t type, const uint8_t *b, int n)
         if (ok != pad.ok) ESP_LOGI(TAG, "Pad: computer link %s", ok ? "up" : "down");
         pad.ok = ok; pad.known = known; pad.pair_open = b[2];
         pad.seen_ms = esp_log_timestamp();
+        if (n >= 5) {                                  // the pad's link to the Mac: log when it changes
+            static int li = -1, ll = -1;
+            if (b[3] != li || b[4] != ll) { li = b[3]; ll = b[4]; if (ok) ESP_LOGI(TAG, "Pad link to computer 1: %.2f ms lat %d", li * 1.25, ll); }
+        }
         if (known && pair_target == PAIR_HOST0 + REMOTE_HOST) pair_target = PAIR_NONE;
     } else if (type == PT_LEDS && n >= 1) {
         host[REMOTE_HOST].leds = b[0];

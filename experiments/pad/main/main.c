@@ -129,8 +129,10 @@ static void status_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(500));
         if (!gpio_get_level(BOOT_GPIO)) { pair_until_us = esp_timer_get_time() + (int64_t)PAIR_SECONDS * 1000000; ESP_LOGI(TAG, "pairing window open (BOOT)"); }
-        uint8_t st[3] = { linked, known, pairing_open() };
-        tx_frame(PT_STATUS, st, 3);
+        struct ble_gap_conn_desc ld;
+        bool have = linked && ble_gap_conn_find(conn, &ld) == 0;
+        uint8_t st[5] = { linked, known, pairing_open(), have ? ld.conn_itvl : 0, have ? ld.conn_latency : 0 };
+        tx_frame(PT_STATUS, st, 5);
         gpio_set_level(LED_GPIO, linked || (pairing_open() && (esp_timer_get_time() / 300000) % 2));
         struct ble_gap_conn_desc d;
         if (linked && ble_gap_conn_find(conn, &d) == 0) {
@@ -138,12 +140,14 @@ static void status_task(void *arg)
                 last_itvl = d.conn_itvl; last_lat = d.conn_latency;
                 ESP_LOGI(TAG, "link %.2f ms lat %d timeout %d ms", d.conn_itvl * 1.25, d.conn_latency, d.supervision_timeout * 10);
             }
-            // The computer picks 7.5 ms with latency 44 for a mouse; ask once for latency 0 so the first move after a pause is not delayed
-            if (ask_step == 0 && esp_timer_get_time() - linked_us > 8000000LL && d.conn_latency != 0) {
+            // The computer may pick 15 ms or 7.5 ms with latency 44: ask for 7.5 ms and latency 0 (a jumpy pointer
+            // means 15 ms; latency delays the first move after a pause). Up to 3 asks, 8 s apart, then leave it.
+            bool good = d.conn_itvl <= 6 && d.conn_latency == 0;
+            if (!good && ask_step < 3 && esp_timer_get_time() - linked_us > (int64_t)(ask_step + 1) * 8000000LL) {
                 struct ble_gap_upd_params up = { .itvl_min = 6, .itvl_max = 6, .latency = 0, .supervision_timeout = 400 };
-                ESP_LOGI(TAG, "asking 7.5 ms, latency 0");
+                ESP_LOGI(TAG, "asking 7.5 ms, latency 0 (try %d)", ask_step + 1);
                 ble_gap_update_params(conn, &up);
-                ask_step = 1;
+                ask_step++;
             }
         } else { last_itvl = 0; last_lat = -1; }
     }
