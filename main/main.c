@@ -198,7 +198,7 @@ static void cfg_defaults(void)
     kvm_cfg.ap_minutes = 3;
     strcpy(kvm_cfg.ap_pass, "espkvm-setup");
     strcpy(kvm_cfg.web_pass, "admin1234");
-    kvm_cfg.mod_swap = 0;
+    kvm_cfg.mod_swap = 1;                      // bit 0 = computer 1 (the Mac): swap Alt and Command. Bit 1 = computer 2
     kvm_cfg.sw_btn = 0;
 }
 
@@ -206,7 +206,7 @@ void kvm_cfg_load(void)
 {
     cfg_defaults();
     nvs_handle_t h;
-    if (nvs_open("kvmcfg", NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_open("kvmcfg", NVS_READWRITE, &h) != ESP_OK) return;
     size_t n = sizeof(kvm_cfg.pair_prefix);
     nvs_get_str(h, "prefix", kvm_cfg.pair_prefix, &n);
     nvs_get_u16(h, "apmin", &kvm_cfg.ap_minutes);
@@ -216,6 +216,15 @@ void kvm_cfg_load(void)
     n = sizeof(kvm_cfg.web_pass);
     nvs_get_str(h, "webpass", kvm_cfg.web_pass, &n);
     nvs_get_u8(h, "modswap", &kvm_cfg.mod_swap);
+    uint8_t mig = 0;                                   // one-time: turn Alt/Command swap on for computer 1 (the Mac)
+    nvs_get_u8(h, "migr1", &mig);
+    if (!mig) {
+        kvm_cfg.mod_swap |= 1;
+        nvs_set_u8(h, "modswap", kvm_cfg.mod_swap);
+        nvs_set_u8(h, "migr1", 1);
+        nvs_commit(h);
+    }
+    ESP_LOGI(TAG, "Alt/Command swap: computer 1 %s, computer 2 %s", (kvm_cfg.mod_swap & 1) ? "on" : "off", (kvm_cfg.mod_swap & 2) ? "on" : "off");
     nvs_get_u8(h, "swbtn", &kvm_cfg.sw_btn);
     uint8_t ns = 0;
     nvs_get_u8(h, "nosleep", &ns);
