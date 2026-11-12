@@ -25,7 +25,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "kvm.h"
 
-#define DEVICE_NAME  "ESP KVM"
+#define DEVICE_NAME  "KVM CMP1"
 #define LED_GPIO     GPIO_NUM_2
 #define BOOT_GPIO    GPIO_NUM_0
 #define UART_PAD     UART_NUM_1

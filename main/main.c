@@ -34,7 +34,7 @@
 #include "kvm.h"
 
 // ---------------------------------------------------------------- settings
-#define DEVICE_NAME       "ESP KVM Win"   // name the computers see
+#define DEVICE_NAME       "KVM CMP2"   // name the computers see
 #define RESET_GPIO        GPIO_NUM_0  // BOOT button (press = switch the Wi-Fi page on)
 #define LED_GPIO          GPIO_NUM_2  // on-board LED on most 38-pin boards: lit = computer 2
 #define LED1_GPIO         GPIO_NUM_25 // external LED (GPIO -> 330 ohm -> LED -> GND): lit = computer 1
