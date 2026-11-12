@@ -317,6 +317,8 @@ static uint16_t sent_buttons;
 static struct ble_npl_callout mouse_co;
 
 static uint32_t dbg_rx, dbg_tx, dbg_pmin = 999, dbg_pmax;           // diagnosis: mouse reports in / out per 3 s
+static int pend_n;                       // incoming mouse reports waiting in acc_*
+static uint32_t pend_ms;                 // when the first of them arrived
 static void mouse_flush(void)
 {
     uint16_t b = merged_buttons();
@@ -326,6 +328,7 @@ static void mouse_flush(void)
         return;
     }
     if (!acc_x && !acc_y && !acc_w && !acc_p && b == sent_buttons) return;
+    pend_n = 0;
     int32_t x = clamp(acc_x, -32767, 32767), y = clamp(acc_y, -32767, 32767);
     int32_t w = clamp(acc_w, -127, 127),     p = clamp(acc_p, -127, 127);
     acc_x -= x; acc_y -= y; acc_w -= w; acc_p -= p;   // anything over the limit goes in the next report
@@ -350,7 +353,7 @@ static void mouse_tick(struct ble_npl_event *ev)
     static uint32_t prev;
     if (prev) { uint32_t pd = now - prev; if (pd < dbg_pmin) dbg_pmin = pd; if (pd > dbg_pmax) dbg_pmax = pd; }
     prev = now;
-    mouse_flush();
+    if (pend_n && now - pend_ms >= 12) mouse_flush();       // a lone leftover report
     due += 15;
     int32_t wait = (int32_t)(due - now);
     if (wait < 1 || wait > 30) { due = now + 15; wait = 15; }   // first run or a long stall: resync
@@ -360,7 +363,12 @@ static void mouse_tick(struct ble_npl_event *ev)
 static void send_mouse(int32_t x, int32_t y, int32_t wheel, int32_t pan)
 {
     acc_x += x; acc_y += y; acc_w += wheel; acc_p += pan;
-    if (merged_buttons() != sent_buttons) mouse_flush();
+    // The mouse sends ~110 reports/s, a 15 ms computer link takes ~66/s. Sending all of them queues
+    // up (laggy pointer); merging by elapsed time gives uneven step sizes (macOS acceleration
+    // pumps). So merge in fixed pairs: every 2nd report goes out carrying both, ~55/s, evenly.
+    if (!pend_n) pend_ms = esp_log_timestamp();
+    pend_n++;
+    if (pend_n >= 2 || merged_buttons() != sent_buttons) mouse_flush();
 }
 
 static void send_consumer_if_changed(void)
@@ -1237,7 +1245,8 @@ static void upd_tick(struct ble_npl_event *ev)
     // Wait until no link has connected, disconnected or finished setup for 10 s (Windows changes
     // its own link timing a few seconds after connecting; an update on the other link at the same
     // time crashes the controller), then send at most ONE request per tick.
-    if (esp_log_timestamp() - last_link_ms >= 10000) {
+    // Also not before 30 s after boot: the input devices connect from 15 s on, and their setup must not overlap an update.
+    if (esp_log_timestamp() >= 30000 && esp_log_timestamp() - last_link_ms >= 10000) {
         bool sent = false;
         for (int h = 0; h < NUM_HOSTS && !sent; h++) {
             struct ble_gap_conn_desc d;

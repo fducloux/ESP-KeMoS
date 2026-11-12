@@ -50,6 +50,7 @@ Bluetooth keyboard/mouse switch, published at https://github.com/fducloux/ESP-Ke
 - The Mac connects with latency 22; `upd_tick` (every 3 s) fixes it within about 10 s.
 - 2026-11-12: every controller crash (`r_lld_evt_update_create`) is a connection-update procedure overlapping another link's setup. Do not set a 6 s supervision timeout (crash loop). Rejecting the mouse's own update requests did nothing. Input scanning starts 15 s after boot so the computers settle first. No update request to the mouse at ready (it ends at 7.5 ms lat 44 anyway). The `c86be9b` baseline also crashes at boot.
 - Mouse drops (`0x208`, supervision timeout) are the MX Master sleeping at lat 44; reconnects work. `encryption failed (7)` is ENOTCONN (link lost mid-handshake), not a bad bond: never delete bonds on it.
+- Mouse forwarding (2026-11-12): the MX Master sends ~110 reports/s, a 15 ms Mac link takes ~66/s. Sending 1:1 is smooth but queues up (pointer reacts late, `notify` failures); merging by elapsed time is uneven and macOS acceleration pumps (jumpy). Merging in fixed pairs (every 2nd report carries both, ~55/s) is smooth and responsive. The tick only sweeps a lone leftover older than 12 ms.
 - Mouse tick runs on a fixed 15 ms grid (re-arming 15 ms after each run beat against the Mac's 15 ms events: pointer sped up and slowed down). Log shows `mouse in/out` per 3 s and the tick min..max.
 - Faster boards (nRF52840) will not help: the limit is macOS, not the ESP32.
 
