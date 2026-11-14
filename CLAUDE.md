@@ -25,6 +25,13 @@ Why: macOS gives a 7.5 ms link only to the mouse appearance `0x03C2`, but one ES
 - Result on 2026-11-12: Mac pointer "0 lag, 0 latency" and Windows "perfect", no controller crash in 35+ minutes with the pad, Windows, mouse and keyboard all connected. The mouse still drops (`0x208`) when idle and reconnects when moved: that is the MX Master sleeping.
 - The other test board is MAC `b4:bf:e9:60:8d:94` (was the hub during development, now spare). Before any flash check the MAC with `python -m esptool --port X chip_id`, and ask before flashing `b4:bf:e9:61:d4:18` (the daily-driver hub).
 
+## Mouse/keyboard drops (2026-11-14)
+- MX Master dropped with `0x208` (supervision timeout, link 7.5 ms lat 44 timeout 2160 ms), mostly after idle gaps; the MX Keys also dropped now and then. Computers did not see it when the devices were connected to them directly.
+- Ruled out: Wi-Fi AP, Windows link, the pad's radio next to the hub (pad held in reset: drops continued), weak signal (RSSI sampled at each report was -45 to -64 dBm; `ble_gap_conn_rssi` polled while idle reads -100 and is stale), the `CONN_UPDATE_REQ` handler (never fires).
+- Changes that helped: `CONFIG_BTDM_CTRL_MODEM_SLEEP=n` (timeouts per minute about 3 times lower in one 19 min run), and a continuous scan (40 ms / 40 ms) while a known input device is missing (reconnects in 1 to 8 s when it advertises). The log line `Input device N ready ... ms after it disconnected` measures it.
+- Also: the hub no longer re-forwards an unchanged host LED state to the keyboard (computers echo it after the no-sleep ghost Shift tap, which lit the MX Keys backlight).
+- Open: timeouts still happen. Delete `sdkconfig` once after pulling (new default in `sdkconfig.defaults`). Do not trust the polled RSSI.
+
 ## Flashing the pad from the hub (2026-11-12): no USB cable on the pad
 - Extra wires, hub to pad (all four needed): hub `D32` (GPIO32) to pad `EN`, hub `D33` (GPIO33) to pad `G0` (BOOT), hub `D26` (GPIO26) to pad `RXD`/`RX0` (GPIO3), hub `D27` (GPIO27) to pad `TXD`/`TX0` (GPIO1). `D35` and the other GPIO34-39 are input only: they cannot drive `G0`. The pad's `EN` and `G0` sit on opposite headers.
 - The hub (`main/padflash.c`, library `espressif/esp-serial-flasher` via `main/idf_component.yml`, `managed_components/` is not committed) pulls `G0` low, resets the pad through `EN`, and writes bootloader (0x1000), partition table (0x8000) and app (0x10000) through the pad's ROM boot loader at 115200 baud (about 1 minute; 460800 and `FLASH_END` were not used: the ROM rejected `FLASH_END` with error 0x06, so each part is verified with MD5 instead). The pad's NVS is not touched, so its pairing survives.

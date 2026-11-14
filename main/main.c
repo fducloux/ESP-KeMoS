@@ -54,6 +54,7 @@ static const char *TAG = "kvm";
 // things have been quiet for a while: overlapping update procedures on several links crash the
 // BLE controller (r_lld_evt_update_create, LoadProhibited).
 static uint32_t last_link_ms;
+static uint32_t gone_ms[2];            // diagnosis: when each input device last disconnected
 static int upd_tries[2];             // per computer: link-update requests sent since it connected
 static void link_event(void) { last_link_ms = esp_log_timestamp(); }
 
@@ -438,6 +439,7 @@ void kvm_on_host_leds(uint16_t conn, uint8_t leds)
 {
     for (int h = 0; h < NUM_HOSTS; h++) {
         if (host[h].conn != conn) continue;
+        if (host[h].leds == leds) continue;      // computers echo the same LED state after any key (even the no-sleep ghost tap): writing it again lights the keyboard's backlight
         host[h].leds = leds;
         if (h == active) forward_leds();
     }
@@ -763,7 +765,8 @@ static void disc_task(void *arg)
             // No link update request here: the devices pick their own power-save timing anyway, and an
             // update procedure overlapping the computers' updates crashes the controller.
             link_event();
-            ESP_LOGI(TAG, "Input device %d ready (%d reports)", idx + 1, d->n_rep);
+            ESP_LOGI(TAG, "Input device %d ready (%d reports), %u ms after it disconnected", idx + 1, d->n_rep,
+                     gone_ms[idx] ? (unsigned)(esp_log_timestamp() - gone_ms[idx]) : 0);
             forward_leds();
         } else {
             ESP_LOGE(TAG, "Input device %d: setup failed, disconnecting", idx + 1);
@@ -864,6 +867,9 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
         // delay to the first key or move after a pause, so ask for fast settings instead.
         struct ble_gap_upd_params *sp = ev->conn_update_req.self_params;
         *sp = *ev->conn_update_req.peer_params;
+        ESP_LOGI(TAG, "Input device %d asks link %.2f-%.2f ms lat %d timeout %d ms", idx + 1,
+                 sp->itvl_min * 1.25, sp->itvl_max * 1.25, sp->latency, sp->supervision_timeout * 10);
+        if (idx == 1) return 0;                                   // mouse: accept its own settings unchanged
         if (sp->itvl_max > 12) sp->itvl_max = 12;                 // 15 ms
         if (sp->itvl_min > sp->itvl_max) sp->itvl_min = sp->itvl_max;
         sp->latency = 0;
@@ -882,6 +888,7 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         link_event();
+        gone_ms[idx] = esp_log_timestamp();
         ESP_LOGI(TAG, "Input device %d disconnected (reason 0x%x) link %.2f ms lat %d timeout %d ms, last report %u ms ago",
                  idx + 1, ev->disconnect.reason, ev->disconnect.conn.conn_itvl * 1.25,
                  ev->disconnect.conn.conn_latency, ev->disconnect.conn.supervision_timeout * 10,
@@ -973,7 +980,7 @@ static void start_scan(void)
     if (ble_gap_disc_active()) return;
 
     struct ble_gap_disc_params p = {
-        .itvl = 0x100, .window = 0x20,  // 160 ms / 20 ms: ~12% radio time, leaves room for the connections
+        .itvl = 0x40, .window = 0x40,   // 40 ms / 40 ms: continuous, only while a known device is missing (a sleeping MX wakes and advertises briefly)
         .passive = 0, .filter_duplicates = 0,
     };
     int rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER, &p, scan_cb, NULL);
@@ -1360,8 +1367,10 @@ static void pad_handle(uint8_t type, const uint8_t *b, int n)
         }
         if (known && pair_target == PAIR_HOST0 + REMOTE_HOST) pair_target = PAIR_NONE;
     } else if (type == PT_LEDS && n >= 1) {
-        host[REMOTE_HOST].leds = b[0];
-        if (active == REMOTE_HOST) forward_leds();
+        if (host[REMOTE_HOST].leds != b[0]) {            // only a real change: see kvm_on_host_leds
+            host[REMOTE_HOST].leds = b[0];
+            if (active == REMOTE_HOST) forward_leds();
+        }
     }
 }
 
