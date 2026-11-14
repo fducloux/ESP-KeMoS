@@ -30,6 +30,7 @@ Why: macOS gives a 7.5 ms link only to the mouse appearance `0x03C2`, but one ES
 - Ruled out: Wi-Fi AP, Windows link, the pad's radio next to the hub (pad held in reset: drops continued), weak signal (RSSI sampled at each report was -45 to -64 dBm; `ble_gap_conn_rssi` polled while idle reads -100 and is stale), the `CONN_UPDATE_REQ` handler (never fires).
 - Changes that helped: `CONFIG_BTDM_CTRL_MODEM_SLEEP=n` (timeouts per minute about 3 times lower in one 19 min run), and a continuous scan (40 ms / 40 ms) while a known input device is missing (reconnects in 1 to 8 s when it advertises). The log line `Input device N ready ... ms after it disconnected` measures it.
 - Also: the hub no longer re-forwards an unchanged host LED state to the keyboard (computers echo it after the no-sleep ghost Shift tap, which lit the MX Keys backlight).
+- Keep-alive (committed 2026-11-15): `keepalive()` in `mouse_tick` reads the Device Name of an input device that has been quiet for 0.8 s, about once a second. Runs: 14 timeouts in 16 min (modem sleep on), 6 in 19 min (off), 3 in 14 min (off + keep-alive): not clearly better, harmless. Timeouts come 2 to 3 s after the mouse's last report, so the mouse goes silent by itself. Plan: nRF52840 BLE sniffer to see what the mouse does before it times out; maybe port the hub to the nRF52840 later.
 - Open: timeouts still happen. Delete `sdkconfig` once after pulling (new default in `sdkconfig.defaults`). Do not trust the polled RSSI.
 
 ## Flashing the pad from the hub (2026-11-12): no USB cable on the pad

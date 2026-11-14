@@ -390,6 +390,17 @@ static void mouse_flush(void)
     sent_buttons = b;
 }
 
+// Keep-alive: an input device that has been quiet for a moment gets a tiny GATT read (Device Name), so
+// its link never looks idle. The MX devices time out (0x208) after quiet spells; this costs a little battery.
+static int keepalive_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg) { return 0; }
+static void keepalive(void)
+{
+    uint32_t now = esp_log_timestamp();
+    for (int i = 0; i < NUM_INPUTS; i++)
+        if (in[i].ready && in[i].conn != NONE && now - in[i].last_rx_ms > 800)
+            ble_gattc_read_by_uuid(in[i].conn, 1, 0xFFFF, BLE_UUID16_DECLARE(0x2A00), keepalive_cb, NULL);
+}
+
 static void mouse_tick(struct ble_npl_event *ev)
 {
     // Fixed 15 ms grid: re-arming "15 ms after this run" gives 15 ms + handler delay, which beats
@@ -400,6 +411,8 @@ static void mouse_tick(struct ble_npl_event *ev)
     if (prev) { uint32_t pd = now - prev; if (pd < dbg_pmin) dbg_pmin = pd; if (pd > dbg_pmax) dbg_pmax = pd; }
     prev = now;
     if (pend_n && now - pend_ms >= 12) mouse_flush();       // a lone leftover report
+    static int ka;
+    if (++ka >= 67) { ka = 0; keepalive(); }                  // about once a second
     due += 15;
     int32_t wait = (int32_t)(due - now);
     if (wait < 1 || wait > 30) { due = now + 15; wait = 15; }   // first run or a long stall: resync
