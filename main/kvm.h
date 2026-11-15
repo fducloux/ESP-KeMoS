@@ -30,6 +30,7 @@ void kvm_cfg_reset(void);
 // ---- status and actions used by the web page (main.c)
 typedef struct {
     bool known, connected, ready;
+    int battery;              // input devices: percent, -1 = unknown
     char addr[18];
 } kvm_dev_status_t;
 typedef struct {

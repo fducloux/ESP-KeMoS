@@ -88,7 +88,7 @@ static esp_err_t status_get(httpd_req_t *req)
         left = (int)((int64_t)kvm_cfg.ap_minutes * 60 - (esp_timer_get_time() - idle_since) / 1000000);
         if (left < 0) left = 0;
     }
-    char b[1000];
+    char b[1100];
     int n = snprintf(b, sizeof(b), "{\"active\":%d,\"learning\":%d,\"pairing\":%d,\"pair_left\":%d,\"passkey\":%ld,\"passkey_for\":\"%s\",\"hosts\":[",
                      s.active, s.learning, s.pairing, s.pair_left, (long)s.passkey, s.passkey_for);
     for (int i = 0; i < 2; i++)
@@ -96,8 +96,8 @@ static esp_err_t status_get(httpd_req_t *req)
                       i ? "," : "", s.host[i].known, s.host[i].connected, s.host[i].addr);
     n += snprintf(b + n, sizeof(b) - n, "],\"inputs\":[");
     for (int i = 0; i < 2; i++)
-        n += snprintf(b + n, sizeof(b) - n, "%s{\"known\":%d,\"connected\":%d,\"ready\":%d,\"addr\":\"%s\"}",
-                      i ? "," : "", s.input[i].known, s.input[i].connected, s.input[i].ready, s.input[i].addr);
+        n += snprintf(b + n, sizeof(b) - n, "%s{\"known\":%d,\"connected\":%d,\"ready\":%d,\"battery\":%d,\"addr\":\"%s\"}",
+                      i ? "," : "", s.input[i].known, s.input[i].connected, s.input[i].ready, s.input[i].battery, s.input[i].addr);
     n += snprintf(b + n, sizeof(b) - n,
                   "],\"cfg\":{\"prefix\":\"%s\",\"apmin\":%d,\"modswap\":%d,\"swbtn\":%d},"
                   "\"default_web_pass\":%d,\"ap_left\":%d,\"heap\":%u,\"uptime\":%d}",

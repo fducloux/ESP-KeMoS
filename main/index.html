@@ -48,7 +48,7 @@ input,select{font:inherit;width:100%;padding:10px;border:1px solid var(--line);b
 
 <h2>Computers</h2>
 <div class="card"><div id="hosts"></div>
-  <div class="row"><span>Swap computer 1 and 2<br><span class="sub">Same computers, numbers exchanged</span></span><button onclick="act('swap_hosts','Swap computer 1 and 2?')">Swap</button></div></div>
+  <div class="row" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><span>Swap computer 1 and 2<br><span class="sub">Same computers, numbers exchanged</span></span><button onclick="act('swap_hosts','Swap computer 1 and 2?')">Swap</button></div></div>
 
 <h2>Keyboard and mouse</h2>
 <div class="card" id="inputs"></div>
@@ -120,6 +120,7 @@ async function save(){
 function dev(name,d,forget,pair,tid,s){
   const pairing=s.pairing===tid;
   let st=d.connected?(d.ready===false?'connecting':'connected'):(d.known?'paired, not connected':'not paired');
+  if(d.connected&&d.battery>=0)st+=' · battery '+d.battery+'%'+(d.battery<=20?' (low)':'');
   if(pairing)st='pairing mode, '+s.pair_left+' s left';
   const btn=d.known?`<button class="dng" onclick="act('${forget}','Forget ${name}?')">Forget</button>`
     :pairing?`<button onclick="act('pair_cancel')">Cancel</button>`

@@ -73,6 +73,10 @@ typedef struct {
     uint16_t   buttons;
     uint16_t   consumer;
     uint32_t   last_rx_ms;       // for disconnect diagnosis
+    int8_t     battery;          // percent from the Battery Service (0x2A19), -1 = not read yet
+    uint16_t   bat_handle;       // Battery Level value handle, 0 = not looked up on this connection
+    uint32_t   bat_ms;           // when the battery was last asked for (0 = ask at once)
+    uint32_t   gatt_busy_until;  // a keep-alive/battery request is in flight until then: one ATT request at a time per link
 } input_t;
 
 typedef struct {
@@ -165,6 +169,7 @@ static void load_state(void)
     char key[8];
     for (int i = 0; i < NUM_INPUTS; i++) {
         in[i].conn = NONE;
+        in[i].battery = -1;
         snprintf(key, sizeof(key), "in%d", i);
         in[i].known = nvs_get_addr(key, &in[i].addr);
     }
@@ -393,12 +398,57 @@ static void mouse_flush(void)
 // Keep-alive: an input device that has been quiet for a moment gets a tiny GATT read (Device Name), so
 // its link never looks idle. The MX devices time out (0x208) after quiet spells; this costs a little battery.
 static int keepalive_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg) { return 0; }
+// Two ATT requests in flight on one link garble each other (battery lookup failed with BLE_HS_EBADDATA), so
+// keep-alive and battery requests take turns: each marks the link busy for a short time.
+static bool gatt_idle(const input_t *d) { return (int32_t)(esp_log_timestamp() - d->gatt_busy_until) >= 0; }
 static void keepalive(void)
 {
     uint32_t now = esp_log_timestamp();
     for (int i = 0; i < NUM_INPUTS; i++)
-        if (in[i].ready && in[i].conn != NONE && now - in[i].last_rx_ms > 800)
+        if (in[i].ready && in[i].conn != NONE && now - in[i].last_rx_ms > 800 && gatt_idle(&in[i])) {
+            in[i].gatt_busy_until = now + 800;
             ble_gattc_read_by_uuid(in[i].conn, 1, 0xFFFF, BLE_UUID16_DECLARE(0x2A00), keepalive_cb, NULL);
+        }
+}
+
+// Battery level for the web page. The standard Battery Service (0x2A19) is looked up and read after
+// setup is done (never during it, so it does not slow down a reconnect): when the page asks (at most once
+// a minute per device) and every 5 minutes from upd_tick, so a value is ready when the page opens.
+static int battery_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg)
+{
+    input_t *d = arg;
+    uint8_t v;
+    if (e->status == 0 && attr && OS_MBUF_PKTLEN(attr->om) >= 1 && os_mbuf_copydata(attr->om, 0, 1, &v) == 0 && v <= 100) {
+        if (d->battery != v) ESP_LOGI(TAG, "Input device %d battery %u%%", (int)(d - in) + 1, v);
+        d->battery = v;
+    } else if (e->status != 0 && e->status != BLE_HS_EDONE) {
+        ESP_LOGW(TAG, "Input device %d: battery read failed (%d)", (int)(d - in) + 1, e->status);
+    }
+    return 0;
+}
+static int battery_chr_cb(uint16_t c, const struct ble_gatt_error *e, const struct ble_gatt_chr *ch, void *arg)
+{
+    input_t *d = arg;
+    int n = (int)(d - in) + 1;
+    if (e->status == 0 && ch) {
+        if (!d->bat_handle) d->bat_handle = ch->val_handle;
+    } else if (e->status == BLE_HS_EDONE) {
+        if (d->bat_handle) { ESP_LOGI(TAG, "Input device %d: battery level at handle %u", n, d->bat_handle); d->bat_ms = 0; }   // read it at once
+        else ESP_LOGW(TAG, "Input device %d: no battery level characteristic", n);
+    } else {
+        ESP_LOGW(TAG, "Input device %d: battery lookup failed (%d)", n, e->status);
+    }
+    return 0;
+}
+static void battery_refresh(input_t *d, uint32_t max_age_ms)
+{
+    uint32_t now = esp_log_timestamp();
+    if (!d->ready || d->conn == NONE || !gatt_idle(d)) return;
+    if (d->bat_ms && now - d->bat_ms < (d->bat_handle ? max_age_ms : 3000)) return;   // lookup is retried after 3 s
+    d->bat_ms = now;
+    d->gatt_busy_until = now + (d->bat_handle ? 800 : 2000);
+    if (d->bat_handle) ble_gattc_read(d->conn, d->bat_handle, battery_cb, d);
+    else ble_gattc_disc_chrs_by_uuid(d->conn, 1, 0xFFFF, BLE_UUID16_DECLARE(0x2A19), battery_chr_cb, d);
 }
 
 static void mouse_tick(struct ble_npl_event *ev)
@@ -827,6 +877,8 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
         if (ev->connect.status == 0) {
             d->conn = ev->connect.conn_handle;
             d->ready = false;
+            d->bat_handle = 0;
+            d->bat_ms = 0;
             // A keyboard wants a passkey typed on it, so we act as "display only"
             // while pairing a new input device; computers pair with "Just Works".
             if (!d->known) ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
@@ -1188,6 +1240,8 @@ void kvm_get_status(kvm_status_t *s)
         s->input[i].known = in[i].known;
         s->input[i].connected = in[i].conn != NONE;
         s->input[i].ready = in[i].ready;
+        s->input[i].battery = in[i].battery;
+        battery_refresh(&in[i], 60000);
         if (in[i].known) addr_str(&in[i].addr, s->input[i].addr);
     }
 }
@@ -1301,6 +1355,7 @@ static struct ble_npl_callout upd_co;
 static void upd_tick(struct ble_npl_event *ev)
 {
     if (pad.ok && esp_log_timestamp() - pad.seen_ms > 3500) { pad.ok = false; ESP_LOGW(TAG, "Pad: no heartbeat, marked offline"); }
+    for (int i = 0; i < NUM_INPUTS; i++) battery_refresh(&in[i], 300000);
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
