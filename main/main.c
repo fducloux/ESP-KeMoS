@@ -76,7 +76,6 @@ typedef struct {
     int8_t     battery;          // percent from the Battery Service (0x2A19), -1 = not read yet
     uint16_t   bat_handle;       // Battery Level value handle, 0 = not looked up on this connection
     uint32_t   bat_ms;           // when the battery was last asked for (0 = ask at once)
-    uint32_t   rssi_ms; int rssi_n, rssi_sum, rssi_min, rssi_max;   // extended logs: RSSI samples of the last 3 s
     uint32_t   gatt_busy_until;  // a keep-alive/battery request is in flight until then: one ATT request at a time per link
 } input_t;
 
@@ -401,17 +400,7 @@ static void mouse_flush(void)
 
 // Keep-alive: an input device that has been quiet for a moment gets a tiny GATT read (Device Name), so
 // its link never looks idle. The MX devices time out (0x208) after quiet spells; this costs a little battery.
-static void rssi_sample(input_t *d)   // extended logs: RSSI of the last packet, at most 4 times a second
-{
-    uint32_t now = esp_log_timestamp();
-    int8_t r;
-    if (!kvm_cfg.ext_log || now - d->rssi_ms < 250 || d->conn == NONE || ble_gap_conn_rssi(d->conn, &r) != 0 || r >= 0 || r < -110) return;
-    d->rssi_ms = now;
-    if (!d->rssi_n || r < d->rssi_min) d->rssi_min = r;
-    if (!d->rssi_n || r > d->rssi_max) d->rssi_max = r;
-    d->rssi_sum += r; d->rssi_n++;
-}
-static int keepalive_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg) { if (arg) rssi_sample(arg); return 0; }
+static int keepalive_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg) { return 0; }
 // Two ATT requests in flight on one link garble each other (battery lookup failed with BLE_HS_EBADDATA), so
 // keep-alive and battery requests take turns: each marks the link busy for a short time.
 static bool gatt_idle(const input_t *d) { return (int32_t)(esp_log_timestamp() - d->gatt_busy_until) >= 0; }
@@ -957,7 +946,6 @@ static int central_cb(struct ble_gap_event *ev, void *arg)
     }
 
     case BLE_GAP_EVENT_NOTIFY_RX:
-        if (d->ready) rssi_sample(d);
         if (d->ready && !ev->notify_rx.indication) {
             uint8_t buf[64];
             uint16_t len = 0;
@@ -1371,12 +1359,6 @@ static void upd_tick(struct ble_npl_event *ev)
 {
     if (pad.ok && esp_log_timestamp() - pad.seen_ms > 3500) { pad.ok = false; ESP_LOGW(TAG, "Pad: no heartbeat, marked offline"); }
     for (int i = 0; i < NUM_INPUTS; i++) battery_refresh(&in[i], 300000);
-    for (int i = 0; i < NUM_INPUTS; i++) {               // extended logs
-        if (kvm_cfg.ext_log && in[i].rssi_n)
-            ESP_LOGI(TAG, "RSSI %s: avg %d min %d max %d dBm (%d samples, 3 s)", i ? "mouse" : "keyboard",
-                     in[i].rssi_sum / in[i].rssi_n, in[i].rssi_min, in[i].rssi_max, in[i].rssi_n);
-        in[i].rssi_n = in[i].rssi_sum = 0;
-    }
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out

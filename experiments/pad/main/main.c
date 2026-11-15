@@ -44,6 +44,7 @@ static ble_addr_t peer;
 static int64_t pair_until_us;
 static uint8_t own_addr_type;
 static int ask_step;
+static int64_t last_ask_us;
 static int64_t linked_us;
 
 void ble_store_config_init(void);
@@ -140,14 +141,17 @@ static void status_task(void *arg)
                 last_itvl = d.conn_itvl; last_lat = d.conn_latency;
                 ESP_LOGI(TAG, "link %.2f ms lat %d timeout %d ms", d.conn_itvl * 1.25, d.conn_latency, d.supervision_timeout * 10);
             }
-            // The computer may pick 15 ms or 7.5 ms with latency 44: ask for 7.5 ms and latency 0 (a jumpy pointer
-            // means 15 ms; latency delays the first move after a pause). Up to 3 asks, 8 s apart, then leave it.
+            // The computer may pick 15 ms or 7.5 ms with latency 44, and macOS flips back to latency 44 now and
+            // then: ask for 7.5 ms and latency 0 (a jumpy pointer means 15 ms; latency 44 delays every key and
+            // mouse move by up to 330 ms). Ask whenever the link is not good, 8 s after the link came up and
+            // 8 s after the last ask, for as long as it stays that way.
             bool good = d.conn_itvl <= 6 && d.conn_latency == 0;
-            if (!good && ask_step < 3 && esp_timer_get_time() - linked_us > (int64_t)(ask_step + 1) * 8000000LL) {
+            int64_t now_us = esp_timer_get_time();
+            if (!good && now_us - linked_us > 8000000LL && now_us - last_ask_us > 8000000LL) {
                 struct ble_gap_upd_params up = { .itvl_min = 6, .itvl_max = 6, .latency = 0, .supervision_timeout = 400 };
-                ESP_LOGI(TAG, "asking 7.5 ms, latency 0 (try %d)", ask_step + 1);
+                ESP_LOGI(TAG, "asking 7.5 ms, latency 0 (try %d)", ++ask_step);
                 ble_gap_update_params(conn, &up);
-                ask_step++;
+                last_ask_us = now_us;
             }
         } else { last_itvl = 0; last_lat = -1; }
     }
@@ -187,7 +191,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
-        linked = true; ask_step = 0; linked_us = esp_timer_get_time();
+        linked = true; ask_step = 0; last_ask_us = 0; linked_us = esp_timer_get_time();
         ESP_LOGI(TAG, "computer connected");
         return 0;
     }
