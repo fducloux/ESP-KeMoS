@@ -57,6 +57,7 @@ input,select{font:inherit;width:100%;padding:10px;border:1px solid var(--line);b
 <div class="card">
   <div class="chk"><input type="checkbox" id="swap0"><span>Computer 1: swap Alt and Command/Win keys (Mac layout)</span></div>
   <div class="chk"><input type="checkbox" id="swap1"><span>Computer 2: swap Alt and Command/Win keys (Mac layout)</span></div>
+  <div class="chk"><input type="checkbox" id="extlog"><span>Extended logs on the USB console (signal strength, mouse report rates). For diagnosis.</span></div>
   <label>Mouse button that switches computers (hold Ctrl+Shift and click it). Keyboard: Ctrl+Shift+Left = computer 1, Right = computer 2.</label>
   <div class="row"><span id="swbtn" class="sub"></span>
     <span><button onclick="act('learn_btn')">Learn</button> <button onclick="act('clear_btn')">Clear</button></span></div>
@@ -106,7 +107,7 @@ async function act(name,ask){
 }
 async function save(){
   const body={prefix:$('prefix').value,
-    apmin:+$('apmin').value,modswap:($('swap0').checked?1:0)|($('swap1').checked?2:0),webpass:$('webpass').value,appass:$('appass').value};
+    apmin:+$('apmin').value,modswap:($('swap0').checked?1:0)|($('swap1').checked?2:0),extlog:$('extlog').checked?1:0,webpass:$('webpass').value,appass:$('appass').value};
   try{
     const r=await call('/api/config',{method:'POST',body:JSON.stringify(body)});
     const t=await r.text();
@@ -141,7 +142,7 @@ function render(s){
   $('left').textContent=s.ap_left<0?'':'Switches off in about '+Math.ceil(s.ap_left/60)+' min after the last phone leaves';
   $('foot').textContent='Uptime '+Math.floor(s.uptime/60)+' min · free memory '+Math.round(s.heap/1024)+' KB';
   if(!loaded){
-    $('swap0').checked=!!(s.cfg.modswap&1);$('swap1').checked=!!(s.cfg.modswap&2);
+    $('swap0').checked=!!(s.cfg.modswap&1);$('swap1').checked=!!(s.cfg.modswap&2);$('extlog').checked=!!s.cfg.extlog;
     $('prefix').value=s.cfg.prefix;$('apmin').value=s.cfg.apmin;loaded=true;
   }
 }

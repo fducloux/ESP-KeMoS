@@ -99,9 +99,9 @@ static esp_err_t status_get(httpd_req_t *req)
         n += snprintf(b + n, sizeof(b) - n, "%s{\"known\":%d,\"connected\":%d,\"ready\":%d,\"battery\":%d,\"addr\":\"%s\"}",
                       i ? "," : "", s.input[i].known, s.input[i].connected, s.input[i].ready, s.input[i].battery, s.input[i].addr);
     n += snprintf(b + n, sizeof(b) - n,
-                  "],\"cfg\":{\"prefix\":\"%s\",\"apmin\":%d,\"modswap\":%d,\"swbtn\":%d},"
+                  "],\"cfg\":{\"prefix\":\"%s\",\"apmin\":%d,\"modswap\":%d,\"swbtn\":%d,\"extlog\":%d},"
                   "\"default_web_pass\":%d,\"ap_left\":%d,\"heap\":%u,\"uptime\":%d}",
-                  kvm_cfg.pair_prefix, kvm_cfg.ap_minutes, kvm_cfg.mod_swap, kvm_cfg.sw_btn,
+                  kvm_cfg.pair_prefix, kvm_cfg.ap_minutes, kvm_cfg.mod_swap, kvm_cfg.sw_btn, kvm_cfg.ext_log,
                   strcmp(kvm_cfg.web_pass, "admin1234") == 0, left,
                   (unsigned)esp_get_free_heap_size(), (int)(esp_timer_get_time() / 1000000));
     httpd_resp_set_type(req, "application/json");
@@ -184,6 +184,7 @@ static esp_err_t config_post(httpd_req_t *req)
         else strcpy(c.pair_prefix, v->valuestring);
     }
     if ((v = cJSON_GetObjectItem(j, "modswap")) && cJSON_IsNumber(v)) c.mod_swap = v->valueint & 3;
+    if ((v = cJSON_GetObjectItem(j, "extlog")) && cJSON_IsNumber(v)) c.ext_log = v->valueint ? 1 : 0;
     if ((v = cJSON_GetObjectItem(j, "apmin")) && cJSON_IsNumber(v)) {
         if (v->valueint < 0 || v->valueint > 240) err = "Wi-Fi timeout: 0 to 240 minutes";
         else c.ap_minutes = v->valueint;

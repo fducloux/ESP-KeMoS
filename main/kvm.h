@@ -21,6 +21,7 @@ typedef struct {
     uint8_t  sw_btn;            // mouse button (1..16) that switches computers with Ctrl+Shift, 0 = off
     uint8_t  mod_swap;          // bit 0 = computer 1, bit 1 = computer 2: swap Alt and Command/Win
     char     web_pass[32];      // login password of the web page (user: admin)
+    uint8_t  ext_log;           // 1 = extended diagnosis logs on the USB console (RSSI, mouse report rates)
 } kvm_cfg_t;
 extern kvm_cfg_t kvm_cfg;
 void kvm_cfg_load(void);
