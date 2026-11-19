@@ -30,6 +30,8 @@ int hid_dev_send_consumer(int host, uint16_t usage);
 // Mouse movement goes to the active computer. It is summed up and sent when the previous
 // notification has gone out, so nothing is lost and nothing waits on a timer.
 void hid_dev_set_active(int host);
+void hid_dev_set_mouse_gap(int ms);
+int hid_dev_get_mouse_gap(void);
 int hid_dev_cycle_mouse_gap(void);                      // 0 -> 8 -> 15 -> 22 ms minimum between mouse reports; returns the new value
 void hid_dev_mouse_in(uint8_t buttons, int dx, int dy, int wheel, int pan);
 

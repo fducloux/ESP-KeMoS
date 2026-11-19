@@ -13,8 +13,11 @@
 #include <bluetooth/services/hogp.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/reboot.h>
+#include <ctype.h>
+#include <stdio.h>
 #include <hal/nrf_power.h>
 #include "hid_dev.h"
+#include "cfg_svc.h"
 
 LOG_MODULE_REGISTER(hub, LOG_LEVEL_INF);
 
@@ -56,10 +59,14 @@ static bool connecting;
 static bt_addr_le_t slot_addr[NUM_INPUTS];
 static bt_addr_le_t host_addr[NUM_HOSTS];
 static uint8_t mod_swap = 1;                 // computer 1 is a Mac by default
+static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2" };   // labels for the config page
+static int mouse_gap_saved = -1;
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
 {
     if (!strcmp(name, "swap")) return rd(cb_arg, &mod_swap, 1) < 0 ? -EIO : 0;
+    if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
+    if (name[0] == 'n' && name[1] >= '0' && name[1] <= '1' && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if ((name[0] != 's' && name[0] != 'h') || name[1] < '0' || name[1] > '1' || name[2]) return -ENOENT;
     bt_addr_le_t *dst = name[0] == 's' ? &slot_addr[name[1] - '0'] : &host_addr[name[1] - '0'];
     return rd(cb_arg, dst, sizeof(bt_addr_le_t)) < 0 ? -EIO : 0;
@@ -576,6 +583,72 @@ static void pair_done(struct bt_conn *c, bool bonded)
 static void pair_failed(struct bt_conn *c, enum bt_security_err reason) { blue_stop(); LOG_WRN("pairing failed, reason %d", reason); }
 static struct bt_conn_auth_info_cb auth_info = { .pairing_complete = pair_done, .pairing_failed = pair_failed };
 
+
+// ---------------------------------------------------------------- configuration page (Web Bluetooth, see cfg_svc.c)
+static void json_name(char *out, size_t n, const char *s)       // names are plain: letters, digits, space, dash
+{
+    size_t j = 0;
+    for (; *s && j + 1 < n; s++) out[j++] = (isalnum((unsigned char)*s) || *s == ' ' || *s == '-') ? *s : '_';
+    out[j] = 0;
+}
+
+int cfg_status(char *buf, size_t n)
+{
+    char n0[20], n1[20];
+    json_name(n0, sizeof(n0), host_name[0]);
+    json_name(n1, sizeof(n1), host_name[1]);
+    return snprintf(buf, n,
+        "{\"v\":1,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,"
+        "\"h\":[{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d},{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d}]}",
+        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode,
+        n0, host_known(0), hid_dev_connected(0), (mod_swap >> 0) & 1,
+        n1, host_known(1), hid_dev_connected(1), (mod_swap >> 1) & 1);
+}
+
+static void forget_host(int h)
+{
+    bt_addr_le_t old = host_addr[h];
+    struct bt_conn *c = hid_dev_conn_for(h);
+    memset(&host_addr[h], 0, sizeof(host_addr[h]));
+    char key[3] = { 'h', '0' + h, 0 };
+    kvm_save(key, &host_addr[h], sizeof(host_addr[h]));
+    if (c) bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    forget_bond_both(&old);
+    LOG_INF("computer %d forgotten", h + 1);
+}
+
+void cfg_command(const char *cmd)
+{
+    int a = 0, b = 0;
+    char word[16] = {0};
+    LOG_INF("config command: %s", cmd);
+    if (sscanf(cmd, "%15s %d %d", word, &a, &b) < 1) return;
+    int h = a - 1;
+    bool valid = h >= 0 && h < NUM_HOSTS;
+    if (!strcmp(word, "pair") && valid) host_pair_begin(h);
+    else if (!strcmp(word, "pairmx")) pairing_begin();
+    else if (!strcmp(word, "switch") && valid) switch_to(h);
+    else if (!strcmp(word, "swap") && valid) {
+        if (b) mod_swap |= 1 << h; else mod_swap &= ~(1 << h);
+        kvm_save("swap", &mod_swap, 1);
+        send_keys();
+    } else if (!strcmp(word, "gap")) {
+        hid_dev_set_mouse_gap(a);
+        int g = hid_dev_get_mouse_gap();
+        kvm_save("gap", &g, sizeof(g));
+    } else if (!strcmp(word, "forget") && valid) forget_host(h);
+    else if (!strcmp(word, "name") && valid) {
+        const char *p = strchr(cmd, ' ');                 // "name 1 Mac": the rest of the line after the number
+        if (p) p = strchr(p + 1, ' ');
+        char tmp[16];
+        json_name(tmp, sizeof(tmp), p ? p + 1 : "");
+        if (!tmp[0]) snprintf(tmp, sizeof(tmp), "Computer %d", a);
+        strcpy(host_name[h], tmp);
+        char key[3] = { 'n', '0' + h, 0 };
+        kvm_save(key, host_name[h], strlen(host_name[h]));
+    } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
+}
+
 static void on_le_param(struct bt_conn *c, uint16_t interval, uint16_t latency, uint16_t timeout)
 {
     if (slot_of(c) >= 0) LOG_INF("slot %d link %u.%02u ms latency %u", slot_of(c), interval * 5 / 4, (interval * 125) % 100, latency);
@@ -614,6 +687,7 @@ int main(void)
     // bonds are kept now
     hid_dev_init();
     hid_dev_id_setup();
+    if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);
     bt_conn_auth_cb_register(&auth_cbs);
     bt_conn_auth_info_cb_register(&auth_info);
     for (int i = 0; i < NUM_INPUTS; i++) {
@@ -623,6 +697,7 @@ int main(void)
     bt_foreach_bond(BT_ID_DEFAULT, bond_cb, NULL);
     auto_start();
     hid_dev_adv_start();
+    hid_dev_adv_start_later();                      // also starts the always-on beacon
     const struct device *con = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
     for (int n = 0;; n++) {
         gpio_pin_toggle_dt(&led);

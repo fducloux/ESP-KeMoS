@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KVM Hub</title>
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --ink: #1b1f27; --muted: #667085; --line: #e1e4ea;
+  --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  --chip: #eef1f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101318; --card: #1a1f27; --ink: #e8ebf0; --muted: #98a2b3; --line: #2b323d;
+    --accent: #5b8def; --accent-ink: #0b1220; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --chip: #232a35;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 20px; margin: 0 0 2px; }
+.sub { color: var(--muted); margin: 0 0 18px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 0 0 12px; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.name { font-weight: 600; font-size: 16px; }
+.chip { display: inline-block; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); font-size: 12.5px; }
+.chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+.active { outline: 2px solid var(--accent); }
+.badge { background: var(--accent); color: var(--accent-ink); font-size: 12px; padding: 2px 9px; border-radius: 999px; font-weight: 600; }
+button, select, input[type=text] {
+  font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 12px; min-height: 36px;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--bad); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+label.sw { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+.hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
+#msg { min-height: 20px; color: var(--muted); font-size: 13px; margin: 6px 2px 0; }
+#msg.err { color: var(--bad); }
+h2 { font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 22px 2px 8px; font-weight: 600; }
+.hidden { display: none; }
+input[type=text] { width: 9em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>KVM Hub</h1>
+  <p class="sub">Settings for your keyboard and mouse switch.</p>
+
+  <div id="unsupported" class="card hidden">
+    This browser cannot talk to Bluetooth devices. Use Chrome or Edge (Safari does not support Web Bluetooth).
+  </div>
+
+  <div class="card" id="connectCard">
+    <div class="row">
+      <div class="grow">
+        <div class="name" id="connName">Not connected</div>
+        <div class="hint" id="connHint">Open this page on a computer that is paired with the hub, then press Connect and pick “KVM CMP2”.</div>
+      </div>
+      <button class="primary" id="connectBtn">Connect</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div id="panel" class="hidden">
+    <h2>Computers</h2>
+    <div id="hosts"></div>
+
+    <h2>Keyboard and mouse</h2>
+    <div class="card">
+      <div class="row"><span class="grow">MX Keys (keyboard)</span><span class="chip" id="kbd">-</span></div>
+      <div class="row" style="margin-top:8px"><span class="grow">MX Master (mouse)</span><span class="chip" id="mouse">-</span></div>
+      <div class="actions"><button id="pairMx">Pair keyboard or mouse…</button></div>
+      <div class="hint" id="pairMxHint">Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). The keyboard asks for the code 123456.</div>
+    </div>
+
+    <h2>Mouse feel</h2>
+    <div class="card">
+      <div class="row">
+        <span class="grow">Space between mouse reports</span>
+        <select id="gap">
+          <option value="0">0 ms (as fast as possible)</option>
+          <option value="8">8 ms (recommended)</option>
+          <option value="15">15 ms</option>
+          <option value="22">22 ms</option>
+        </select>
+      </div>
+      <div class="hint">Try 8 ms first. If the pointer feels uneven on one computer, try another value.</div>
+    </div>
+
+    <h2>Shortcuts</h2>
+    <div class="card hint" style="margin:0">
+      Ctrl + Shift + Left Arrow switches to computer 1, Ctrl + Shift + Right Arrow to computer 2.
+    </div>
+  </div>
+</main>
+
+<script>
+const SVC = "5a6f0001-6b76-4d48-8f2e-7d9c1b2a3c4d";
+const CH_STATE = "5a6f0002-6b76-4d48-8f2e-7d9c1b2a3c4d";
+const CH_CMD = "5a6f0003-6b76-4d48-8f2e-7d9c1b2a3c4d";
+const $ = (id) => document.getElementById(id);
+let device = null, server = null, chState = null, chCmd = null, timer = null, state = null, busy = false;
+const pairUntil = [0, 0];            // when each computer's pairing window ends (ms)
+let pairMxUntil = 0;
+
+if (!navigator.bluetooth) { $("unsupported").classList.remove("hidden"); $("connectBtn").disabled = true; }
+
+function say(text, isErr) { const m = $("msg"); m.textContent = text || ""; m.className = isErr ? "err" : ""; }
+
+async function send(cmd) {
+  if (!chCmd) return;
+  const data = new TextEncoder().encode(cmd);
+  try {
+    if (chCmd.writeValueWithResponse) await chCmd.writeValueWithResponse(data); else await chCmd.writeValue(data);
+  } catch (e) { say("Could not send the command: " + e.message, true); }
+  setTimeout(poll, 300);
+}
+
+async function poll() {
+  if (!chState || busy) return;
+  busy = true;
+  try {
+    const v = await chState.readValue();
+    state = JSON.parse(new TextDecoder().decode(v));
+    render();
+    say("");
+  } catch (e) { say("Reading the hub failed: " + e.message, true); }
+  busy = false;
+}
+
+function chip(el, text, cls) { el.textContent = text; el.className = "chip " + (cls || ""); }
+
+function render() {
+  if (!state) return;
+  $("panel").classList.remove("hidden");
+  chip($("kbd"), state.kbd ? "connected" : "not connected", state.kbd ? "ok" : "warn");
+  chip($("mouse"), state.mouse ? "connected" : "not connected", state.mouse ? "ok" : "warn");
+  $("gap").value = String(state.gap);
+  const now = Date.now();
+  if (state.pair) pairUntil[state.pair - 1] = pairUntil[state.pair - 1] > now ? pairUntil[state.pair - 1] : now + 120000;
+  else pairUntil[0] = pairUntil[1] = 0;
+  if (state.pairmx) pairMxUntil = pairMxUntil > now ? pairMxUntil : now + 60000; else pairMxUntil = 0;
+  $("pairMx").disabled = !!state.pairmx;
+  $("pairMx").textContent = state.pairmx ? "Pairing… (" + Math.max(0, Math.round((pairMxUntil - now) / 1000)) + " s)" : "Pair keyboard or mouse…";
+
+  const box = $("hosts");
+  if (!box.children.length) {
+    state.h.forEach((_, i) => {
+      const c = document.createElement("div");
+      c.className = "card"; c.id = "host" + i;
+      c.innerHTML =
+        '<div class="row"><div class="grow"><span class="name"></span> <span class="badge hidden">in use</span></div><span class="chip"></span></div>' +
+        '<div class="row" style="margin-top:10px"><label class="sw"><input type="checkbox" class="swap"> Swap Alt and Command (for a Mac)</label></div>' +
+        '<div class="actions">' +
+        '<button class="use primary">Use this computer</button>' +
+        '<button class="pair">Pair…</button>' +
+        '<button class="rename">Rename</button>' +
+        '<button class="forget danger">Forget</button></div>' +
+        '<div class="hint pairhint hidden"></div>';
+      box.appendChild(c);
+      c.querySelector(".use").onclick = () => send("switch " + (i + 1));
+      c.querySelector(".pair").onclick = () => { pairUntil[i] = Date.now() + 120000; send("pair " + (i + 1)); };
+      c.querySelector(".swap").onchange = (e) => send("swap " + (i + 1) + " " + (e.target.checked ? 1 : 0));
+      c.querySelector(".rename").onclick = () => {
+        const n = prompt("Name for this computer", state.h[i].n);
+        if (n !== null && n.trim()) send("name " + (i + 1) + " " + n.trim().slice(0, 15));
+      };
+      c.querySelector(".forget").onclick = () => {
+        if (confirm("Forget " + state.h[i].n + "? It has to be paired again to use the hub.")) send("forget " + (i + 1));
+      };
+    });
+  }
+  state.h.forEach((h, i) => {
+    const c = $("host" + i), isActive = state.active === i;
+    c.classList.toggle("active", isActive);
+    c.querySelector(".name").textContent = h.n;
+    c.querySelector(".badge").classList.toggle("hidden", !isActive);
+    chip(c.querySelector(".chip"), h.on ? "connected" : h.known ? "paired, not connected" : "not paired", h.on ? "ok" : h.known ? "warn" : "bad");
+    c.querySelector(".swap").checked = !!h.swap;
+    c.querySelector(".use").disabled = isActive || !h.on;
+    const open = state.pair === i + 1;
+    c.querySelector(".pair").textContent = h.known ? "Pair again…" : "Pair…";
+    c.querySelector(".pair").disabled = open;
+    c.querySelector(".forget").disabled = !h.known;
+    const hint = c.querySelector(".pairhint");
+    hint.classList.toggle("hidden", !open);
+    if (open) hint.textContent = "Pairing is open for " + Math.max(0, Math.round((pairUntil[i] - now) / 1000)) + " s. On that computer, open Bluetooth settings, forget any old “KVM CMP2” and add “KVM CMP2” again.";
+  });
+}
+
+$("gap").onchange = (e) => send("gap " + e.target.value);
+$("pairMx").onclick = () => { pairMxUntil = Date.now() + 60000; send("pairmx"); };
+
+async function open() {
+  server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  chState = await svc.getCharacteristic(CH_STATE);
+  chCmd = await svc.getCharacteristic(CH_CMD);
+  $("connName").textContent = "Connected to " + (device.name || "KVM CMP2");
+  $("connHint").textContent = "Changes apply at once and are saved on the hub.";
+  $("connectBtn").textContent = "Disconnect";
+  clearInterval(timer);
+  await poll();
+  timer = setInterval(poll, 1500);
+}
+
+function closed() {
+  clearInterval(timer); chState = chCmd = null; state = null;
+  $("panel").classList.add("hidden"); $("hosts").innerHTML = "";
+  $("connName").textContent = "Not connected";
+  $("connHint").textContent = "Open this page on a computer that is paired with the hub, then press Connect and pick “KVM CMP2”.";
+  $("connectBtn").textContent = "Connect";
+}
+
+async function reconnect() {          // the link drops briefly when the hub switches computers
+  for (let i = 0; i < 5 && device; i++) {
+    try { say("Reconnecting…"); await open(); say(""); return; } catch (e) { await new Promise((r) => setTimeout(r, 1500)); }
+  }
+  closed(); say("The connection was lost. Press Connect to try again.", true);
+}
+
+$("connectBtn").onclick = async () => {
+  if (device && device.gatt.connected) { const d = device; device = null; d.gatt.disconnect(); closed(); return; }
+  try {
+    say("");
+    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "KVM" }], optionalServices: [SVC] });
+    device.addEventListener("gattserverdisconnected", () => { if (device) reconnect(); });
+    await open();
+  } catch (e) {
+    if (e.name !== "NotFoundError") say("Could not connect: " + e.message + ". The computer must be paired with the hub first.", true);
+    if (!(device && device.gatt.connected)) closed();
+  }
+};
+</script>
+</body>
+</html>

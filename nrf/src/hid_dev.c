@@ -179,7 +179,24 @@ void hid_dev_adv_start(void)
     else if (!rc) LOG_INF("advertising as \"%s\"", CONFIG_BT_DEVICE_NAME);
 }
 
-static void adv_fn(struct k_work *w) { hid_dev_adv_start(); }
+// Always-on, slow, scannable but not connectable: lets a browser list the hub when both computers are
+// connected and the connectable set is off. (The browser then talks over the link its computer already has.)
+static struct bt_le_ext_adv *beacon;
+static void beacon_start(void)
+{
+    int rc;
+    if (!beacon) {
+        struct bt_le_adv_param ap = BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_SCANNABLE | BT_LE_ADV_OPT_USE_IDENTITY, 0x0640, 0x0780, NULL);   // 1 - 1.2 s
+        ap.id = adv_id;
+        rc = bt_le_ext_adv_create(&ap, NULL, &beacon);
+        if (!rc) rc = bt_le_ext_adv_set_data(beacon, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+        if (rc) { LOG_ERR("beacon set %d", rc); beacon = NULL; return; }
+    }
+    rc = bt_le_ext_adv_start(beacon, BT_LE_EXT_ADV_START_DEFAULT);
+    if (rc && rc != -EALREADY) LOG_ERR("beacon start %d", rc);
+}
+
+static void adv_fn(struct k_work *w) { hid_dev_adv_start(); beacon_start(); }
 static K_WORK_DELAYABLE_DEFINE(adv_work, adv_fn);
 // restart after a connection: the controller needs a moment to finish stopping the old set
 void hid_dev_adv_start_later(void) { k_work_reschedule(&adv_work, K_MSEC(300)); }
@@ -270,6 +287,9 @@ static void mouse_tick_fn(struct k_work *w)
     }
     k_work_reschedule(&mouse_work, K_MSEC(MOUSE_TICK_MS));
 }
+
+void hid_dev_set_mouse_gap(int ms) { mouse_gap_ms = ms < 0 ? 0 : ms > 40 ? 40 : ms; }
+int hid_dev_get_mouse_gap(void) { return mouse_gap_ms; }
 
 int hid_dev_cycle_mouse_gap(void)
 {
