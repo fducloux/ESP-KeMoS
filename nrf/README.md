@@ -1,16 +1,35 @@
-# KVM hub on the nRF52840 (Seeed XIAO nRF52840)
+# NRF-KeMoSw: keyboard and mouse switch on the nRF52840
 
-Port of the ESP32 hub to Zephyr and the nRF Connect SDK (v3.4.2, Nordic SoftDevice controller).
-The MX Keys and MX Master 3 connect to the board over Bluetooth LE (the board is the central).
-Two computers see the board as one Bluetooth keyboard, mouse and media-key device called "KVM CMP2".
-Ctrl+Shift+Left Arrow sends everything to computer 1, Ctrl+Shift+Right Arrow to computer 2.
+NRF-KeMoSw (Ke = keyboard, Mo = mouse, Sw = switch) is firmware for a Seeed XIAO nRF52840 (Sense) that shares one
+Logitech MX Keys and one MX Master 3 between up to four computers over Bluetooth LE. It is built with the nRF Connect SDK
+(v3.4.2, Nordic SoftDevice controller). The ESP32 version of the project is
+[ESP-KeMoS](https://github.com/fducloux/ESP-KeMoS).
 
-There is no Wi-Fi on this chip, so the setup page works over Bluetooth instead: open `web/index.html` in
-Chrome or Edge on either computer (Safari has no Web Bluetooth), press Connect and pick "KVM CMP2".
-The page shows both computers, the keyboard and mouse, and lets you switch, pair, forget, rename,
-swap Alt/Command and set the mouse spacing. The UART console keys below do the same and more.
-The page needs an encrypted link, so the computer must already be paired with the hub. On the first
-run with no computer paired yet, use the UART keys `1` or `2`.
+The MX devices connect to the board (the board is the central). The computers see the board as one Bluetooth
+keyboard, mouse and media-key device called "8REC-KM". The computers sit in an order (left-most to right-most, set on the page):
+Ctrl+Shift+Left / Right Arrow moves one place (wrapping round only with three or more computers), Ctrl+Shift+1 to 4 jump to a position.
+
+## Setup page (no screen needed)
+The chip has no Wi-Fi, so setup runs from a phone or computer over Bluetooth, with a Web Bluetooth page published at
+https://fducloux.github.io/NRF-KeMoSw/ (Chrome or Edge, Android Chrome, or Bluefy on iPhone; Safari has no Web Bluetooth).
+The page source is `web/index.html` here; the published copy lives in the separate public repo `fducloux/NRF-KeMoSw`
+(copy the file there as `index.html` and push), because this repo is private and free GitHub Pages needs a public one.
+
+1. Power the board. For 5 minutes after every power-up or reset (and when nothing is paired yet, 30 minutes with a step-by-step
+   wizard) the phone link is open and the green LED stays on. Later: tap a phone on the NFC coil, or hold Ctrl+Shift and type 8, R, E, C
+   on the MX Keys, to open it again for 5 minutes.
+2. Open the page, press Connect and pick "8REC-KM setup". The wizard walks through keyboard (a random code to type on it),
+   mouse (no code), computer 1, computer 2. More computers are added with Add computer; drag the cards to set the order.
+3. Press Disconnect phone when done.
+
+Each computer card also has its own mouse settings (spacing between reports, even out big steps), because Windows and macOS
+treat the pointer differently.
+
+### NFC tag
+The XIAO's two NFC pads (P0.09 and P0.10, so those pins are not GPIO) take a 13.56 MHz coil. A coil taken from an
+RFID key fob (about 9 turns, 33 mm across) soldered straight to the pads read reliably with an iPhone 13 Pro with no
+tuning capacitor. Keep the coil a few millimetres away from the board's copper and the USB shell. The tag is emulated
+in `src/nfc.c`; change `PAGE_URL` there to point it at another page.
 
 ## Build and flash
 ```
