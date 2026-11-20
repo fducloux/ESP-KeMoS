@@ -790,11 +790,10 @@ int cfg_status(char *buf, size_t n)
     return o;
 }
 
-// Computers a and a+dir trade places: addresses, names, Alt/Command swap and no-sleep go with the computer, and so do live links.
-static void move_host(int a, int dir)
+// Computers a and b trade places: addresses, names, Alt/Command swap and no-sleep go with the computer, and so do live links.
+static void move_host(int a, int b)
 {
-    int b = a + dir;
-    if (a < 0 || a >= NUM_HOSTS || b < 0 || b >= NUM_HOSTS) return;
+    if (a < 0 || a >= NUM_HOSTS || b < 0 || b >= NUM_HOSTS || a == b) return;
     bt_addr_le_t ta = host_addr[a]; host_addr[a] = host_addr[b]; host_addr[b] = ta;
     char tn[16]; memcpy(tn, host_name[a], 16); memcpy(host_name[a], host_name[b], 16); memcpy(host_name[b], tn, 16);
     uint8_t ms = ((mod_swap >> a) & 1) | (((mod_swap >> b) & 1) << 1);              // bit 0 = old a, bit 1 = old b
@@ -803,14 +802,14 @@ static void move_host(int a, int dir)
     nosleep_bits = (nosleep_bits & ~((1 << a) | (1 << b))) | (((ns >> 1) & 1) << a) | ((ns & 1) << b);
     if (active == a) active = b; else if (active == b) active = a;
     hid_dev_swap_hosts(a, b);
-    for (int h = a < b ? a : b; h <= (a < b ? b : a); h++) {
+    for (int h = a, i = 0; i < 2; i++, h = b) {
         char k1[3] = { 'h', '0' + h, 0 }, k2[3] = { 'n', '0' + h, 0 };
         kvm_save(k1, &host_addr[h], sizeof(host_addr[h]));
         kvm_save(k2, host_name[h], strlen(host_name[h]));
     }
     kvm_save("swap", &mod_swap, 1);
     kvm_save("ns", &nosleep_bits, 1);
-    LOG_INF("computer %d moved %s (now position %d)", a + 1, dir < 0 ? "left" : "right", b + 1);
+    LOG_INF("positions %d and %d traded places", a + 1, b + 1);
 }
 
 static void forget_host(int h)
@@ -865,7 +864,7 @@ void cfg_command(const char *cmd)
         strcpy(host_name[h], tmp);
         char key[3] = { 'n', '0' + h, 0 };
         kvm_save(key, host_name[h], strlen(host_name[h]));
-    } else if (!strcmp(word, "move") && valid && (b == -1 || b == 1)) move_host(h, b);
+    } else if (!strcmp(word, "pos") && valid) move_host(h, b - 1);        // "pos 3 1": computer 3 takes position 1, whoever was there takes its place
     else if (!strcmp(word, "bootloader")) { k_sleep(K_MSEC(100)); nrf_power_gpregret_set(NRF_POWER, 0, 0x57); sys_reboot(SYS_REBOOT_COLD);
     } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
 }
