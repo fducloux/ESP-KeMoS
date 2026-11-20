@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -52,7 +53,10 @@ static int active_host;
 static int idle_tries[NUM_HOSTS];                // asks to relax an idle computer's link that macOS undid
 
 static struct k_work_delayable link_work, mouse_work;
+K_THREAD_STACK_DEFINE(mouse_q_stack, 3072);
+static struct k_work_q mouse_q;                  // own thread: sending a notification may block, and must not hold up the Bluetooth threads or the system queue
 static void link_fn(struct k_work *w);
+void links_dump(const char *why);
 static void mouse_tick_fn(struct k_work *w);
 static K_MUTEX_DEFINE(send_lock);       // bt_hids_inp_rep_send must not run from two threads at once
 
@@ -73,9 +77,11 @@ static void leds_handler(struct bt_hids_rep *rep, struct bt_conn *conn, bool wri
 
 void hid_dev_init(void)
 {
+    k_work_queue_start(&mouse_q, mouse_q_stack, K_THREAD_STACK_SIZEOF(mouse_q_stack), K_PRIO_PREEMPT(6), NULL);
+    k_thread_name_set(&mouse_q.thread, "mouse_q");
     k_work_init_delayable(&mouse_work, mouse_tick_fn);
     k_work_init_delayable(&link_work, link_fn);
-    k_work_reschedule(&mouse_work, K_MSEC(MOUSE_TICK_MS));
+    k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(MOUSE_TICK_MS));
     struct bt_hids_init_param p = { 0 };
     p.rep_map.data = report_map;
     p.rep_map.size = sizeof(report_map);
@@ -196,7 +202,15 @@ static void beacon_start(void)
     if (rc && rc != -EALREADY) LOG_ERR("beacon start %d", rc);
 }
 
-static void adv_fn(struct k_work *w) { hid_dev_adv_start(); beacon_start(); }
+static bool beacon_wanted = true;
+void hid_dev_beacon(bool on)
+{
+    beacon_wanted = on;
+    if (on) beacon_start(); else if (beacon) bt_le_ext_adv_stop(beacon);
+}
+bool hid_dev_beacon_on(void) { return beacon_wanted; }
+
+static void adv_fn(struct k_work *w) { hid_dev_adv_start(); if (beacon_wanted) beacon_start(); }
 static K_WORK_DELAYABLE_DEFINE(adv_work, adv_fn);
 // restart after a connection: the controller needs a moment to finish stopping the old set
 void hid_dev_adv_start_later(void) { k_work_reschedule(&adv_work, K_MSEC(300)); }
@@ -228,7 +242,9 @@ static struct {
 static int clamp16(int v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
 static int clamp8(int v) { return v > 127 ? 127 : v < -127 ? -127 : v; }
 
-static unsigned st_in, st_ok, st_fail;
+static unsigned st_in, st_ok, st_fail, st_maxd, st_maxgap, st_stuck, st_maxdone, st_slowdone;
+static int64_t st_last_send;
+static int64_t tot_in_x, tot_in_y, tot_out_x, tot_out_y;     // running sums since boot (diagnosis: is movement conserved?)
 static int64_t st_t;
 static volatile int mouse_gap_ms = 8;     // minimum time between mouse reports (0 = as soon as the previous one is out); 8 ms felt best on the Mac
 static int64_t last_send_ms;
@@ -237,8 +253,9 @@ static int64_t inflight_since;
 
 static void mouse_done(struct bt_conn *c, void *user_data)
 {
+    { unsigned d = k_uptime_get() - inflight_since; if (d > st_maxdone) st_maxdone = d; if (d > 20) st_slowdone++; }
     atomic_clear(&inflight);
-    k_work_reschedule(&mouse_work, K_NO_WAIT);     // send what was summed up meanwhile, at once
+    k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_NO_WAIT);     // send what was summed up meanwhile, at once
 }
 
 static void mouse_flush(void)
@@ -250,13 +267,15 @@ static void mouse_flush(void)
     if (atomic_get(&inflight)) { k_mutex_unlock(&send_lock); return; }
     if (mouse_gap_ms) {                                 // keep the reports evenly spaced
         int64_t wait = last_send_ms + mouse_gap_ms - k_uptime_get();
-        if (wait > 0) { k_work_reschedule(&mouse_work, K_MSEC(wait)); k_mutex_unlock(&send_lock); return; }
+        if (wait > 0) { k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(wait)); k_mutex_unlock(&send_lock); return; }
     }
     unsigned key = irq_lock();
     int dx = clamp16(mac.dx), dy = clamp16(mac.dy), wh = clamp8(mac.wheel), pn = clamp8(mac.pan);
     uint8_t b = mac.buttons;
     irq_unlock(key);
     if (!dx && !dy && !wh && !pn && b == mac.sent_buttons) { k_mutex_unlock(&send_lock); return; }
+    { unsigned m = MAX(abs(dx), abs(dy)); if (m > st_maxd) st_maxd = m;
+      int64_t t = k_uptime_get(); if (st_last_send && t - st_last_send < 300 && (unsigned)(t - st_last_send) > st_maxgap) st_maxgap = t - st_last_send; st_last_send = t; }
     uint8_t r[7] = { b, dx & 0xff, dx >> 8, dy & 0xff, dy >> 8, (uint8_t)wh, (uint8_t)pn };
     atomic_set(&inflight, 1);
     inflight_since = k_uptime_get();
@@ -265,6 +284,7 @@ static void mouse_flush(void)
     st_ok++;
     key = irq_lock();
     mac.dx -= dx; mac.dy -= dy; mac.wheel -= wh; mac.pan -= pn;
+    tot_out_x += dx; tot_out_y += dy;
     irq_unlock(key);
     mac.sent_buttons = b;
     k_mutex_unlock(&send_lock);
@@ -273,19 +293,20 @@ static void mouse_flush(void)
 static void mouse_tick_fn(struct k_work *w)
 {
     int64_t now = k_uptime_get();
-    if (atomic_get(&inflight) && now - inflight_since > 100) atomic_clear(&inflight);   // lost completion
+    if (atomic_get(&inflight) && now - inflight_since > 100) { atomic_clear(&inflight); st_stuck++; }   // lost completion
     mouse_flush();
     if (now - st_t >= 2000) {
         if (st_in) {
             struct bt_conn_info ci = {0};
             struct bt_conn *c = hid_dev_conn_for(active_host);
             if (c) bt_conn_get_info(c, &ci);
-            LOG_INF("mouse 2 s, computer %d (link %u.%02u ms lat %u): in %u, sent %u, failed %u", active_host + 1,
-                    ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency, st_in, st_ok, st_fail);
+            LOG_INF("mouse 2 s, computer %d (link %u.%02u ms lat %u): in %u, sent %u, failed %u | max step %u, max gap %u ms, stuck %u, completion max %u ms (%u over 20) | totals in %d,%d out %d,%d pending %d,%d", active_host + 1,
+                    ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency, st_in, st_ok, st_fail, st_maxd, st_maxgap, st_stuck, st_maxdone, st_slowdone, (int)tot_in_x, (int)tot_in_y, (int)tot_out_x, (int)tot_out_y, mac.dx, mac.dy);
         }
-        st_in = st_ok = st_fail = 0; st_t = now;
+        if (st_slowdone >= 2) { static int64_t last_dump; if (now - last_dump > 10000) { last_dump = now; links_dump("slow completions"); } }
+        st_in = st_ok = st_fail = st_maxd = st_maxgap = st_stuck = st_maxdone = st_slowdone = 0; st_t = now;
     }
-    k_work_reschedule(&mouse_work, K_MSEC(MOUSE_TICK_MS));
+    k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(MOUSE_TICK_MS));
 }
 
 void hid_dev_set_mouse_gap(int ms) { mouse_gap_ms = ms < 0 ? 0 : ms > 40 ? 40 : ms; }
@@ -300,14 +321,27 @@ int hid_dev_cycle_mouse_gap(void)
     return mouse_gap_ms;
 }
 
+// diagnosis: +1/-1 count at 100 Hz for a few seconds (no net movement), so delivery timing can be measured without a hand
+static int jiggle_left;
+static void jiggle_fn(struct k_work *w);
+static K_WORK_DELAYABLE_DEFINE(jiggle_work, jiggle_fn);
+static void jiggle_fn(struct k_work *w)
+{
+    if (jiggle_left-- <= 0) return;
+    hid_dev_mouse_in(0, jiggle_left & 1 ? 1 : -1, 0, 0, 0);
+    k_work_reschedule_for_queue(&mouse_q, &jiggle_work, K_MSEC(10));
+}
+void hid_dev_jiggle(int ms) { jiggle_left = ms / 10; k_work_reschedule_for_queue(&mouse_q, &jiggle_work, K_NO_WAIT); }
+
 void hid_dev_mouse_in(uint8_t buttons, int dx, int dy, int wheel, int pan)
 {
     st_in++;
     unsigned key = irq_lock();
     mac.dx += dx; mac.dy += dy; mac.wheel += wheel; mac.pan += pan;
+    tot_in_x += dx; tot_in_y += dy;
     mac.buttons = buttons;
     irq_unlock(key);
-    mouse_flush();                                     // goes out at once unless one is in flight
+    k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_NO_WAIT);   // the mouse thread sends; this thread never blocks on it
 }
 
 // a new computer gets the mouse: nothing meant for the old one may leak over

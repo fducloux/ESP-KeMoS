@@ -12,6 +12,8 @@ void hid_dev_init(void);
 // make sure the computer-facing identity exists (call after settings_load)
 void hid_dev_id_setup(void);
 void hid_dev_adv_start(void);
+void hid_dev_beacon(bool on);                            // the always-on scannable advertisement for the config page
+bool hid_dev_beacon_on(void);
 void hid_dev_adv_start_later(void);     // 300 ms later, from a work item (use after a connection event)
 
 // A computer connected (role peripheral). It is "pending" until main.c knows which computer it is.
@@ -32,6 +34,7 @@ int hid_dev_send_consumer(int host, uint16_t usage);
 void hid_dev_set_active(int host);
 void hid_dev_set_mouse_gap(int ms);
 int hid_dev_get_mouse_gap(void);
+void hid_dev_jiggle(int ms);                            // diagnosis only
 int hid_dev_cycle_mouse_gap(void);                      // 0 -> 8 -> 15 -> 22 ms minimum between mouse reports; returns the new value
 void hid_dev_mouse_in(uint8_t buttons, int dx, int dy, int wheel, int pan);
 

@@ -165,7 +165,9 @@ static void auto_start(void)
     int n = 0;
     bt_foreach_bond(BT_ID_DEFAULT, add_bond_cb, &n);
     if (!n) { LOG_INF("no bonded devices: type P on the UART to pair one"); return; }
-    struct bt_conn_le_create_param cp = BT_CONN_LE_CREATE_PARAM_INIT(BT_CONN_LE_OPT_NONE, BT_GAP_SCAN_FAST_INTERVAL, BT_GAP_SCAN_FAST_WINDOW);
+    // Looking for a missing device must not eat radio time from the links that carry the mouse:
+    // 10 ms of scanning every 100 ms (the default 30 ms every 60 ms delayed the computers' links by 30-60 ms).
+    struct bt_conn_le_create_param cp = BT_CONN_LE_CREATE_PARAM_INIT(BT_CONN_LE_OPT_NONE, 160, 16);
     struct bt_le_conn_param pp = BT_LE_CONN_PARAM_INIT(6, 12, 0, 400);   // 7.5-15 ms, latency 0, 4 s timeout
     int rc = bt_conn_le_create_auto(&cp, &pp);
     if (rc) LOG_ERR("auto connect %d", rc);
@@ -649,6 +651,25 @@ void cfg_command(const char *cmd)
     } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
 }
 
+// diagnosis: every link's timing, to catch what degrades the radio schedule
+void links_dump(const char *why)
+{
+    LOG_INF("links (%s):", why);
+    for (int i = 0; i < NUM_INPUTS; i++) {
+        struct bt_conn_info ci;
+        if (!in[i].conn || bt_conn_get_info(in[i].conn, &ci)) continue;
+        LOG_INF("  %s: %u.%02u ms lat %u to %u ms", i ? "mouse" : "keyboard", ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100,
+                ci.le.latency, ci.le.timeout * 10);
+    }
+    for (int h = 0; h < NUM_HOSTS; h++) {
+        struct bt_conn_info ci;
+        struct bt_conn *c = hid_dev_conn_for(h);
+        if (!c || bt_conn_get_info(c, &ci)) continue;
+        LOG_INF("  computer %d%s: %u.%02u ms lat %u to %u ms", h + 1, h == active ? " (active)" : "", ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100,
+                ci.le.latency, ci.le.timeout * 10);
+    }
+}
+
 static void on_le_param(struct bt_conn *c, uint16_t interval, uint16_t latency, uint16_t timeout)
 {
     if (slot_of(c) >= 0) LOG_INF("slot %d link %u.%02u ms latency %u", slot_of(c), interval * 5 / 4, (interval * 125) % 100, latency);
@@ -705,6 +726,10 @@ int main(void)
         while (uart_poll_in(con, &c) == 0)           // type B on the UART: reboot into the UF2 bootloader
             if (c == 'P') pairing_begin();
             else if (c == '1' || c == '2') host_pair_begin(c - '1');
+            else if (c == 'Y') { hid_dev_beacon(!hid_dev_beacon_on()); LOG_INF("beacon %s", hid_dev_beacon_on() ? "on" : "off"); }
+            else if (c == 'N') links_dump("asked");
+            else if (c == 'J') hid_dev_jiggle(6000);
+            else if (c == 'R') { LOG_INF("rebooting"); k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
             else if (c == 'M') LOG_INF("mouse report spacing now %d ms", hid_dev_cycle_mouse_gap());
             else if (c == '3' || c == '4') switch_to(c - '3');
             else if (c == 'S') { mod_swap ^= 1 << active; kvm_save("swap", &mod_swap, 1); LOG_INF("computer %d Alt/Command swap %s", active + 1, (mod_swap >> active) & 1 ? "on" : "off"); send_keys(); }

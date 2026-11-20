@@ -35,9 +35,14 @@ the UART console and the firmware reboots into the bootloader.
 | `L` | list bonds on both Bluetooth identities |
 | `D` | log every incoming input report |
 | `T` | test the blue LED |
+| `Y` | toggle the always-on beacon (for the config page) |
+| `N` | print every link's interval and latency |
+| `J` | diagnosis: jiggle the pointer by +-1 count for 6 s and report delivery timing |
+| `R` | reboot |
 | `B` | reboot into the UF2 bootloader |
 
 ## Notes
+- Reconnecting a sleeping keyboard or mouse scans for 10 ms every 100 ms. A bigger scan duty (the Zephyr default of 30 ms every 60 ms) delayed the computers' links by 30 to 90 ms and made the pointer jumpy and inaccurate on macOS.
 - The MX devices use identity 0, the computers identity 1 (own address, extended advertising set).
 - The active computer gets a 7.5 ms link; the idle one a relaxed 30 to 50 ms.
 - The fixed passkey is only offered on connections to the MX devices; computers pair without a code
