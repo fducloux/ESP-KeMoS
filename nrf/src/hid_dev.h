@@ -23,6 +23,9 @@ bool hid_dev_is_host_conn(const struct bt_conn *c);
 int  hid_dev_host_of(const struct bt_conn *c);          // 0..NUM_HOSTS-1, or -1 while pending
 void hid_dev_assign(struct bt_conn *c, int host);       // c is computer `host`; an older link of it is dropped
 bool hid_dev_connected(int host);
+void hid_dev_mark_config(struct bt_conn *c);           // this link uses the config service (a phone): keep it
+int  hid_dev_disconnect_config(void);                  // drop every such link, returns how many
+bool hid_dev_config_connected(void);
 struct bt_conn *hid_dev_conn_for(int host);             // or NULL
 struct bt_conn *hid_dev_pending(void);                  // a connected computer nobody has identified yet, or NULL
 

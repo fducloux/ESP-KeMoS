@@ -13,11 +13,13 @@
 #include <bluetooth/services/hogp.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/random/random.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <hal/nrf_power.h>
 #include "hid_dev.h"
 #include "cfg_svc.h"
+#include "nfc.h"
 
 LOG_MODULE_REGISTER(hub, LOG_LEVEL_INF);
 
@@ -61,11 +63,15 @@ static bt_addr_le_t host_addr[NUM_HOSTS];
 static uint8_t mod_swap = 1;                 // computer 1 is a Mac by default
 static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2" };   // labels for the config page
 static int mouse_gap_saved = -1;
+static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
+static uint8_t nosleep_bits;                 // bit per computer: a Left Shift tap every 30 s keeps it awake
 static char why_log[96];                     // last bond removals with their reason, kept in flash (UART key W)
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
 {
     if (!strcmp(name, "swap")) return rd(cb_arg, &mod_swap, 1) < 0 ? -EIO : 0;
+    if (!strcmp(name, "btn")) { uint8_t b[2] = {0}; int r = rd(cb_arg, b, 2); if (r >= 2) { sw_btn = b[0]; ns_btn = b[1]; } return r < 0 ? -EIO : 0; }
+    if (!strcmp(name, "ns")) return rd(cb_arg, &nosleep_bits, 1) < 0 ? -EIO : 0;
     if (!strcmp(name, "why")) { int r = rd(cb_arg, why_log, sizeof(why_log) - 1); why_log[r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
     if (name[0] == 'n' && name[1] >= '0' && name[1] <= '1' && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
@@ -110,6 +116,17 @@ static int slot_of(const struct bt_conn *c) { for (int i = 0; i < NUM_INPUTS; i+
 //    on its Easy-Switch channel is caught even with directed advertising;
 //  - pairing mode (type P on the UART, 60 s): scan for a device advertising the HID service and its name, pair fresh.
 static bool pairing_mode;
+static int pair_slot = -1;                      // which MX device the pairing window is for: 0 keyboard, 1 mouse, -1 either
+
+// Setup mode (the phone): while open, a phone may use the config service without being paired. A wizard walks through the steps.
+enum { ST_KBD, ST_MOUSE, ST_C1, ST_C2, ST_DONE };
+static bool setup_open;
+static uint8_t setup_step = ST_DONE;
+static int64_t setup_until;                     // when setup closes by itself (ms of uptime), 0 = never
+static uint32_t gen_code;                       // random code for the next keyboard pairing, 0 = use the fixed one
+static void setup_begin(bool wizard, int minutes);
+static void setup_event(int what, int idx);     // 0 = an MX device was paired (idx = slot), 1 = a new computer joined (idx)
+
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *buf);
 static void auto_start(void);
 static void scan_start(void);
@@ -195,21 +212,22 @@ static void pairing_end_fn(struct k_work *w)
 {
     if (!pairing_mode) return;
     pairing_mode = false;
+    pair_slot = -1;
     bt_le_scan_stop();
-    gpio_pin_set_dt(&led_r, 0);
     LOG_INF("pairing mode over");
     auto_start();
 }
 static K_WORK_DELAYABLE_DEFINE(pairing_end_work, pairing_end_fn);
 
-static void pairing_begin(void)
+static void pairing_begin(int slot)
 {
     pairing_mode = true;
+    pair_slot = slot;
     bt_conn_create_auto_stop();
-    gpio_pin_set_dt(&led_r, 1);                       // red LED on while the pairing window is open
     scan_start();
-    k_work_reschedule(&pairing_end_work, K_SECONDS(60));
-    LOG_INF("pairing mode for 60 s: put the keyboard or mouse into pairing mode");
+    int secs = setup_open ? 300 : 60;
+    k_work_reschedule(&pairing_end_work, K_SECONDS(secs));
+    LOG_INF("pairing mode for %d s: put the %s into pairing mode", secs, slot == 0 ? "keyboard" : slot == 1 ? "mouse" : "keyboard or mouse");
 }
 
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *buf)
@@ -220,7 +238,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct 
     if (!a.hid) return;
     int slot = -1;
     for (int i = 0; i < NUM_INPUTS; i++)
-        if (!in[i].conn && !strncmp(a.name, in_name[i], strlen(in_name[i]))) { slot = i; break; }
+        if (!in[i].conn && (pair_slot < 0 || pair_slot == i) && !strncmp(a.name, in_name[i], strlen(in_name[i]))) { slot = i; break; }
     if (slot < 0) return;
     char s[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(addr, s, sizeof(s));
@@ -244,7 +262,10 @@ static bool host_dbg;           // log every input report (type D on the UART)
 static int active;              // the computer that gets the keyboard and mouse now
 static uint8_t keys[32], last_keys[32], suppressed[32];   // HID usage bitmaps: 0xE0..0xE7 are the modifiers
 static uint16_t consumer, last_consumer;
-static uint8_t mouse_buttons;
+static uint8_t mouse_buttons;               // buttons the computer sees
+static uint8_t mouse_raw;                   // buttons as the mouse reports them
+static uint8_t btn_suppress;                // buttons hidden from the computer until released (a hotkey click)
+static uint8_t learn_btn;                   // 1 = the next click becomes the switch button, 2 = the no-sleep button
 static uint8_t led_state[NUM_HOSTS];                      // keyboard LEDs each computer asked for
 static int led_sent = -1;                                 // last LED value written to the MX Keys
 static struct bt_hogp_rep_info *kbd_led_rep;              // the MX Keys output report with the LEDs
@@ -307,7 +328,6 @@ static void switch_to(int target)
     active = target;
     hid_dev_set_active(target);
     last_consumer = 0;
-    gpio_pin_set_dt(&led, active == 0);               // green = computer 1, off = computer 2
     LOG_INF(">>> Switched to computer %d%s", active + 1, hid_dev_connected(active) ? "" : " (not connected yet)");
     send_keys();
     led_sent = -1;
@@ -321,7 +341,16 @@ static bool hotkey(int u)
     if (is_modifier(u)) return false;
     bool ctrl = bm_get(keys, 0xE0) || bm_get(keys, 0xE4);
     bool shift = bm_get(keys, 0xE1) || bm_get(keys, 0xE5);
-    if (!ctrl || !shift) return false;
+    static int seq_pos;
+    if (!ctrl || !shift) { seq_pos = 0; return false; }
+    static const uint8_t seq[4] = { 0x25, 0x15, 0x08, 0x06 };     // Ctrl+Shift held, then 8 R E C: open the phone link
+    if (u == seq[seq_pos] || u == seq[0]) {
+        seq_pos = (u == seq[seq_pos]) ? seq_pos + 1 : 1;
+        bm_set(suppressed, u);
+        if (seq_pos == 4) { seq_pos = 0; setup_begin(false, 5); }
+        return true;
+    }
+    seq_pos = 0;
     int target = u == HK_LEFT ? 0 : u == HK_RIGHT ? 1 : -1;
     if (target < 0) return false;
     bm_set(suppressed, u);                // swallow the arrow *before* switching, so the new computer never sees it
@@ -346,6 +375,46 @@ static void keys_released(void)       // the keyboard went away: nothing stays p
     process_keys();
 }
 
+static bool ctrl_shift_down(void)
+{
+    return (bm_get(keys, 0xE0) || bm_get(keys, 0xE4)) && (bm_get(keys, 0xE1) || bm_get(keys, 0xE5));
+}
+
+static void nosleep_set(int h, bool on)
+{
+    if (on) nosleep_bits |= 1 << h; else nosleep_bits &= ~(1 << h);
+    kvm_save("ns", &nosleep_bits, 1);
+    LOG_INF("no-sleep computer %d: %s", h + 1, on ? "on" : "off");
+}
+
+static void buttons_save(void) { uint8_t b[2] = { sw_btn, ns_btn }; kvm_save("btn", b, 2); }
+
+static void learn_end_fn(struct k_work *w) { if (learn_btn) { learn_btn = 0; LOG_INF("learn timed out"); } }
+static K_WORK_DELAYABLE_DEFINE(learn_end_work, learn_end_fn);
+
+static void learn_begin(int what)
+{
+    learn_btn = what;
+    k_work_reschedule(&learn_end_work, K_SECONDS(15));
+    LOG_INF("press the mouse button to use as the %s button (15 s)", what == 1 ? "switch" : "no-sleep");
+}
+
+// A mouse button went down: either a hotkey click (Ctrl+Shift held) or the button being learned.
+static void mouse_click(uint8_t newly)
+{
+    if (learn_btn) {
+        int bit = __builtin_ctz(newly);
+        if (learn_btn == 1) sw_btn = bit + 1; else ns_btn = bit + 1;
+        LOG_INF("learned: mouse button %d is the %s button", bit + 1, learn_btn == 1 ? "switch" : "no-sleep");
+        learn_btn = 0; btn_suppress |= 1 << bit; buttons_save();
+        k_work_cancel_delayable(&learn_end_work);
+        return;
+    }
+    if (!ctrl_shift_down()) return;
+    if (sw_btn && ((newly >> (sw_btn - 1)) & 1)) { btn_suppress |= 1 << (sw_btn - 1); switch_to(1 - active); }
+    else if (ns_btn && ((newly >> (ns_btn - 1)) & 1)) { btn_suppress |= 1 << (ns_btn - 1); nosleep_set(active, !((nosleep_bits >> active) & 1)); }
+}
+
 static uint8_t report_cb(struct bt_hogp *h, struct bt_hogp_rep_info *rep, uint8_t err, const uint8_t *data)
 {
     if (!data) return BT_GATT_ITER_STOP;
@@ -367,8 +436,12 @@ static uint8_t report_cb(struct bt_hogp *h, struct bt_hogp_rep_info *rep, uint8_
     } else if (h == &in[1].hogp && id == 2 && n == 7) {  // MX Master: 16 buttons, X/Y 12 bit, wheel, pan
         int16_t x = (int16_t)(data[2] | ((data[3] & 0x0f) << 8)); if (x & 0x800) x |= 0xf000;
         int16_t y = (int16_t)((data[3] >> 4) | (data[4] << 4));   if (y & 0x800) y |= 0xf000;
-        mouse_buttons = data[0];
-        hid_dev_mouse_in(data[0], x, y, (int8_t)data[5], (int8_t)data[6]);
+        uint8_t raw = data[0], newly = raw & ~mouse_raw;
+        mouse_raw = raw;
+        if (newly) mouse_click(newly);
+        btn_suppress &= raw;                              // a hidden click stays hidden until the button is released
+        mouse_buttons = raw & ~btn_suppress;
+        hid_dev_mouse_in(mouse_buttons, x, y, (int8_t)data[5], (int8_t)data[6]);
     }
     return BT_GATT_ITER_CONTINUE;
 }
@@ -427,7 +500,6 @@ static void host_pair_end_fn(struct k_work *w)
 {
     if (host_pair < 0) return;
     host_pair = -1;
-    gpio_pin_set_dt(&led_r, 0);
     LOG_INF("computer pairing window over");
 }
 static K_WORK_DELAYABLE_DEFINE(host_pair_end_work, host_pair_end_fn);
@@ -435,9 +507,9 @@ static K_WORK_DELAYABLE_DEFINE(host_pair_end_work, host_pair_end_fn);
 static void host_pair_begin(int h)
 {
     host_pair = h;
-    gpio_pin_set_dt(&led_r, 1);
-    k_work_reschedule(&host_pair_end_work, K_SECONDS(120));
-    LOG_INF("computer %d pairing window for 120 s: pair \"%s\" on that computer now", h + 1, CONFIG_BT_DEVICE_NAME);
+    int secs = setup_open ? 300 : 120;
+    k_work_reschedule(&host_pair_end_work, K_SECONDS(secs));
+    LOG_INF("computer %d pairing window for %d s: pair \"%s\" on that computer now", h + 1, secs, CONFIG_BT_DEVICE_NAME);
 }
 
 static bool same_addr(const bt_addr_le_t *a, const bt_addr_le_t *b) { return !memcmp(a->a.val, b->a.val, 6); }   // bytes only: macOS flips public/random
@@ -477,9 +549,9 @@ static void identify_host(struct bt_conn *c, bool fresh)
     kvm_save(key, a, sizeof(*a));
     host_pair = -1;
     k_work_cancel_delayable(&host_pair_end_work);
-    gpio_pin_set_dt(&led_r, 0);
     hid_dev_assign(c, h);
     host_assigned(h);
+    if (setup_open) setup_event(1, h);
 }
 
 // a computer that connected and never told us who it is gets dropped
@@ -491,6 +563,69 @@ static void host_check_fn(struct k_work *w)
     refuse_host(c, "never identified itself");
 }
 static K_WORK_DELAYABLE_DEFINE(host_check_work, host_check_fn);
+
+// ---------------------------------------------------------------- setup wizard (driven from the phone page)
+static void setup_enter_step(int step)
+{
+    setup_step = step;
+    gen_code = 0;
+    switch (step) {
+    case ST_KBD:   gen_code = 100000 + sys_rand32_get() % 900000; pairing_begin(0); break;   // a fresh random code every time
+    case ST_MOUSE: pairing_begin(1); break;
+    case ST_C1:    host_pair_begin(0); break;
+    case ST_C2:    host_pair_begin(1); break;
+    default:       break;
+    }
+    LOG_INF("setup step %d%s", step, step == ST_KBD ? " (code on the page)" : "");
+}
+
+static void setup_close_windows(void)
+{
+    if (pairing_mode) pairing_end_fn(NULL);
+    if (host_pair >= 0) host_pair_end_fn(NULL);
+}
+
+static void setup_next_fn(struct k_work *w)
+{
+    if (!setup_open || setup_step >= ST_DONE) return;
+    setup_close_windows();
+    setup_enter_step(setup_step + 1);
+}
+static K_WORK_DELAYABLE_DEFINE(setup_next_work, setup_next_fn);
+
+static void setup_event(int what, int idx)
+{
+    bool done = (what == 0 && ((setup_step == ST_KBD && idx == 0) || (setup_step == ST_MOUSE && idx == 1))) ||
+                (what == 1 && ((setup_step == ST_C1 && idx == 0) || (setup_step == ST_C2 && idx == 1)));
+    if (done) k_work_reschedule(&setup_next_work, K_MSEC(1500));      // a moment later: let the new link finish its own setup
+}
+
+static void setup_begin(bool wizard, int minutes)
+{
+    setup_open = true;
+    setup_until = k_uptime_get() + (int64_t)minutes * 60000;
+    LOG_INF("setup open for %d min%s", minutes, wizard ? " (wizard)" : "");
+    if (wizard) setup_enter_step(ST_KBD); else setup_step = ST_DONE;
+}
+
+static void setup_end(void)
+{
+    setup_open = false;
+    setup_step = ST_DONE;
+    gen_code = 0;
+    k_work_cancel_delayable(&setup_next_work);
+    setup_close_windows();
+    int n = hid_dev_disconnect_config();
+    LOG_INF("setup closed (%d phone link%s dropped)", n, n == 1 ? "" : "s");
+}
+
+// The config service: a paired computer, or any device while setup is open (that link is then kept as the config link).
+bool cfg_access_ok(struct bt_conn *c)
+{
+    if (hid_dev_host_of(c) >= 0) return true;
+    if (setup_open) { hid_dev_mark_config(c); return true; }
+    return false;
+}
 
 static const struct bt_conn_auth_cb auth_input;      // defined below
 
@@ -542,7 +677,7 @@ static void on_disconnected(struct bt_conn *c, uint8_t reason)
     in[slot].conn = NULL; in[slot].ready = false;
     connecting = false;
     if (slot == 0) { kbd_led_rep = NULL; keys_released(); if (consumer) { consumer = last_consumer = 0; hid_dev_send_consumer(active, 0); } }
-    if (slot == 1) { mouse_buttons = 0; hid_dev_mouse_in(0, 0, 0, 0, 0); }
+    if (slot == 1) { mouse_buttons = mouse_raw = btn_suppress = 0; hid_dev_mouse_in(0, 0, 0, 0, 0); }
     k_work_reschedule(&rescan_work, K_MSEC(1500));
 }
 static void on_security(struct bt_conn *c, bt_security_t level, enum bt_security_err err)
@@ -569,6 +704,7 @@ static void on_security(struct bt_conn *c, bt_security_t level, enum bt_security
 static void blue_blink_fn(struct k_work *w);
 static K_WORK_DELAYABLE_DEFINE(blue_blink_work, blue_blink_fn);
 static bool blue_active;
+static bool passkey_wait;          // a code has to be typed on the keyboard (green blinks slowly)
 static void blue_blink_fn(struct k_work *w)
 {
     if (!blue_active) return;
@@ -576,18 +712,18 @@ static void blue_blink_fn(struct k_work *w)
     k_work_reschedule(&blue_blink_work, K_MSEC(120));
 }
 static void blue_start(void) { blue_active = true; k_work_reschedule(&blue_blink_work, K_NO_WAIT); }
-static void blue_stop(void) { blue_active = false; k_work_cancel_delayable(&blue_blink_work); gpio_pin_set_dt(&led_b, 0); }
+static void blue_stop(void) { passkey_wait = false; blue_active = false; k_work_cancel_delayable(&blue_blink_work); gpio_pin_set_dt(&led_b, 0); }
 
 static void blue_test_stop_fn(struct k_work *w) { blue_stop(); }
 static K_WORK_DELAYABLE_DEFINE(blue_test_stop, blue_test_stop_fn);
 
 static void passkey_display(struct bt_conn *c, unsigned int passkey)
 {
-    blue_start();                                     // blue LED blinks: type the passkey on the keyboard now
+    passkey_wait = true;                              // green LED blinks slowly: type the passkey on the keyboard now
     printk("\n*** TYPE THIS PASSKEY ON THE KEYBOARD OR COMPUTER, THEN PRESS ENTER: %06u ***\n\n", passkey);
 }
 static void pair_cancel(struct bt_conn *c) { blue_stop(); LOG_WRN("pairing cancelled"); }
-static unsigned int app_passkey(struct bt_conn *c) { return 123456; }
+static unsigned int app_passkey(struct bt_conn *c) { return gen_code ? gen_code : 123456; }
 static struct bt_conn_auth_cb auth_cbs = { .cancel = pair_cancel };   // global: no IO, computers pair without a code
 static const struct bt_conn_auth_cb auth_input = { .passkey_display = passkey_display, .app_passkey = app_passkey, .cancel = pair_cancel };   // MX Keys: type 123456 on the keyboard
 static void pair_done(struct bt_conn *c, bool bonded)
@@ -597,7 +733,8 @@ static void pair_done(struct bt_conn *c, bool bonded)
     int sl = slot_of(c);
     if (bonded && sl >= 0) slot_save(sl, bt_conn_get_dst(c));
     if (bonded && hid_dev_is_host_conn(c)) { identify_host(c, true); return; }
-    if (pairing_mode) { k_work_cancel_delayable(&pairing_end_work); pairing_mode = false; gpio_pin_set_dt(&led_r, 0); }
+    if (pairing_mode) { k_work_cancel_delayable(&pairing_end_work); pairing_mode = false; pair_slot = -1; }
+    if (bonded && sl >= 0 && setup_open) setup_event(0, sl);
 }
 static void pair_failed(struct bt_conn *c, enum bt_security_err reason) { blue_stop(); LOG_WRN("pairing failed, reason %d", reason); }
 static struct bt_conn_auth_info_cb auth_info = { .pairing_complete = pair_done, .pairing_failed = pair_failed };
@@ -611,17 +748,25 @@ static void json_name(char *out, size_t n, const char *s)       // names are pla
     out[j] = 0;
 }
 
+// a phone read the NFC tag: open the setup window so the page can connect
+void nfc_tapped(void)
+{
+    LOG_INF("nfc tag read by a phone");
+    setup_begin(false, 5);
+}
+
 int cfg_status(char *buf, size_t n)
 {
     char n0[20], n1[20];
     json_name(n0, sizeof(n0), host_name[0]);
     json_name(n1, sizeof(n1), host_name[1]);
     return snprintf(buf, n,
-        "{\"v\":1,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,"
-        "\"h\":[{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d},{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d}]}",
-        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode,
-        n0, host_known(0), hid_dev_connected(0), (mod_swap >> 0) & 1,
-        n1, host_known(1), hid_dev_connected(1), (mod_swap >> 1) & 1);
+        "{\"v\":2,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],"
+        "\"h\":[{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d},{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d}]}",
+        setup_open, setup_step, setup_step == ST_KBD ? gen_code : 0, hid_dev_config_connected(),
+        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode, sw_btn, ns_btn, learn_btn, nfc_field_count(), nfc_read_count(),
+        n0, host_known(0), hid_dev_connected(0), (mod_swap >> 0) & 1, (nosleep_bits >> 0) & 1,
+        n1, host_known(1), hid_dev_connected(1), (mod_swap >> 1) & 1, (nosleep_bits >> 1) & 1);
 }
 
 static void forget_host(int h)
@@ -645,13 +790,21 @@ void cfg_command(const char *cmd)
     int h = a - 1;
     bool valid = h >= 0 && h < NUM_HOSTS;
     if (!strcmp(word, "pair") && valid) host_pair_begin(h);
-    else if (!strcmp(word, "pairmx")) pairing_begin();
+    else if (!strcmp(word, "pairmx")) pairing_begin(-1);
     else if (!strcmp(word, "switch") && valid) switch_to(h);
     else if (!strcmp(word, "swap") && valid) {
         if (b) mod_swap |= 1 << h; else mod_swap &= ~(1 << h);
         kvm_save("swap", &mod_swap, 1);
         send_keys();
-    } else if (!strcmp(word, "stroke")) {            // "stroke <per> <n> <ms> <reps>" (diagnosis)
+    } else if (!strcmp(word, "setup")) {
+        if (a == 0) setup_end();
+        else if (a == 1) { setup_close_windows(); setup_begin(true, 10); }
+        else if (a == 2 && setup_open && setup_step < ST_DONE) k_work_reschedule(&setup_next_work, K_NO_WAIT);
+    } else if (!strcmp(word, "learn") && (a == 1 || a == 2)) learn_begin(a);
+    else if (!strcmp(word, "nosleep") && valid) nosleep_set(h, b);
+    else if (!strcmp(word, "swbtn") && a >= 0 && a <= 8) { sw_btn = a; buttons_save(); }
+    else if (!strcmp(word, "nsbtn") && a >= 0 && a <= 8) { ns_btn = a; buttons_save(); }
+    else if (!strcmp(word, "stroke")) {            // "stroke <per> <n> <ms> <reps>" (diagnosis)
         int per = 0, n = 0, ms = 0, reps = 0;
         if (sscanf(cmd, "%*s %d %d %d %d", &per, &n, &ms, &reps) == 4) hid_dev_stroke(per, n, ms, reps);
     } else if (!strcmp(word, "gap")) {
@@ -668,6 +821,7 @@ void cfg_command(const char *cmd)
         strcpy(host_name[h], tmp);
         char key[3] = { 'n', '0' + h, 0 };
         kvm_save(key, host_name[h], strlen(host_name[h]));
+    } else if (!strcmp(word, "bootloader")) { k_sleep(K_MSEC(100)); nrf_power_gpregret_set(NRF_POWER, 0, 0x57); sys_reboot(SYS_REBOOT_COLD);
     } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
 }
 
@@ -724,6 +878,42 @@ static void bond_cb(const struct bt_bond_info *info, void *ud)
     LOG_INF("stored bond: %s", as);
 }
 
+// No-sleep: every 30 s a Left Shift tap goes to each computer that has it on (it counts as activity and types nothing).
+// Never while the active computer is being typed on. The LEDs show the selected computer and its no-sleep state (see below).
+static void ns_fn(struct k_work *w);
+static K_WORK_DELAYABLE_DEFINE(ns_work, ns_fn);
+static void ns_fn(struct k_work *w)
+{
+    static unsigned n;
+    n++;
+    if ((n % 300) == 0 || (n % 300) == 1) {                    // press, then release 100 ms later
+        bool press = (n % 300) == 0, anykey = false;
+        for (int b = 0; b < 32; b++) anykey |= keys[b] != 0;
+        for (int h = 0; h < NUM_HOSTS; h++) {
+            if (!((nosleep_bits >> h) & 1) || !hid_dev_connected(h)) continue;
+            if (h == active && anykey) continue;
+            uint8_t rpt[8] = {0};
+            if (press) rpt[0] = 0x02;
+            hid_dev_send_keyboard(h, rpt);
+        }
+    }
+    // One LED per computer: red = computer 1, blue = computer 2. The selected computer's LED is on; with no-sleep on it
+    // dips off for 100 ms every 2 s. An unselected computer's LED is off; with no-sleep on it flashes on for 100 ms every 2 s.
+    // The two blink one second apart. Green is for pairing: it blinks while any pairing window is open.
+    bool ns0 = nosleep_bits & 1, ns1 = nosleep_bits & 2, p0 = (n % 20) == 0, p1 = (n % 20) == 10;
+    gpio_pin_set_dt(&led_r, active == 0 ? !(ns0 && p0) : (ns0 && p0));
+    // Green is for pairing: fast blink while a pairing window is open and the hub is scanning or waiting for the device,
+    // slow blink while the device is connected and waiting for you (the code to type), off when pairing is complete.
+    bool g = false;
+    if (passkey_wait) g = (n % 10) < 5;
+    else if (pairing_mode || host_pair >= 0) g = (n % 2) == 0;
+    else g = setup_open;                                   // steady green: the phone link is open
+    gpio_pin_set_dt(&led, g);
+    if (setup_open && setup_until && k_uptime_get() > setup_until) setup_end();
+    if (!blue_active) gpio_pin_set_dt(&led_b, active == 1 ? !(ns1 && p1) : (ns1 && p1));
+    k_work_reschedule(&ns_work, K_MSEC(100));
+}
+
 int main(void)
 {
     gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);   // marker 1: green stays on while we wait
@@ -750,14 +940,20 @@ int main(void)
     }
     bt_foreach_bond(BT_ID_DEFAULT, bond_cb, NULL);
     auto_start();
+    nfc_tag_init();
     hid_dev_adv_start();
     hid_dev_adv_start_later();                      // also starts the always-on beacon
+    k_work_reschedule(&ns_work, K_MSEC(100));
+    {   // a hub with nothing paired at all starts the setup wizard for the phone by itself
+        static const uint8_t z[6];
+        bool fresh = !memcmp(slot_addr[0].a.val, z, 6) && !memcmp(slot_addr[1].a.val, z, 6) && !host_known(0) && !host_known(1);
+        if (fresh) setup_begin(true, 30);
+    }
     const struct device *con = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
     for (int n = 0;; n++) {
-        gpio_pin_toggle_dt(&led);
         unsigned char c;
         while (uart_poll_in(con, &c) == 0)           // type B on the UART: reboot into the UF2 bootloader
-            if (c == 'P') pairing_begin();
+            if (c == 'P') pairing_begin(-1);
             else if (c == '1' || c == '2') host_pair_begin(c - '1');
             else if (c == 'Y') { hid_dev_beacon(!hid_dev_beacon_on()); LOG_INF("beacon %s", hid_dev_beacon_on() ? "on" : "off"); }
             else if (c == 'N') links_dump("asked");
@@ -775,6 +971,8 @@ int main(void)
                     LOG_INF("mouse link: asking %u.%02u ms (rc %d)", u[c - 'f'] * 5 / 4, (u[c - 'f'] * 125) % 100, bt_conn_le_param_update(in[1].conn, &p));
                 }
             }
+            else if (c == 'l') learn_begin(1);
+            else if (c == 'o') learn_begin(2);
             else if (c == 'Z') LOG_INF("mouse resampling %s", hid_dev_toggle_resample() ? "ON" : "off");
             else if (c == 'M') LOG_INF("mouse report spacing now %d ms", hid_dev_cycle_mouse_gap());
             else if (c == '3' || c == '4') switch_to(c - '3');
@@ -785,7 +983,12 @@ int main(void)
             else if (c == 'U') forget_computers();
             else if (c == 'D') { host_dbg = !host_dbg; LOG_INF("report log %d", host_dbg); }
             else if (c == 'T') { blue_start(); k_work_schedule(&blue_test_stop, K_SECONDS(6)); LOG_INF("blue LED test, 6 s"); }
-            else if (c == 'X') { unpair_why(BT_ID_DEFAULT, NULL, "key X"); unpair_why(1, NULL, "key X"); LOG_INF("all bonds forgotten"); }
+            else if (c == 'X') {
+                unpair_why(BT_ID_DEFAULT, NULL, "key X"); unpair_why(1, NULL, "key X");
+                memset(slot_addr, 0, sizeof(slot_addr)); memset(host_addr, 0, sizeof(host_addr));
+                for (int i = 0; i < 2; i++) { char k[3] = { 's', '0' + i, 0 }, k2[3] = { 'h', '0' + i, 0 }; kvm_save(k, &slot_addr[i], sizeof(slot_addr[i])); kvm_save(k2, &host_addr[i], sizeof(host_addr[i])); }
+                LOG_INF("all bonds and saved devices forgotten");
+            }
             else if (c == 'W') LOG_INF("bond removals (newest first): %s", why_log[0] ? why_log : "none recorded");
             else if (c == 'B') {
                 printk("rebooting into UF2 bootloader\n");

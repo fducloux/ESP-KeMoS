@@ -3,18 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KVM Hub</title>
+<title>8REC-KM</title>
 <style>
 :root {
   --bg: #f4f5f7; --card: #ffffff; --ink: #1b1f27; --muted: #667085; --line: #e1e4ea;
   --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
   --chip: #eef1f6;
+  --led1: #d63a3a; --led2: #2c6fd6; --led3: #2a9d5c;   /* the hub's lights: red = computer 1, blue = computer 2, green = pairing */
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #101318; --card: #1a1f27; --ink: #e8ebf0; --muted: #98a2b3; --line: #2b323d;
     --accent: #5b8def; --accent-ink: #0b1220; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
     --chip: #232a35;
+    --led1: #ff6b6b; --led2: #6aa6ff; --led3: #4cd68a;
   }
 }
 * { box-sizing: border-box; }
@@ -28,8 +30,9 @@ h1 { font-size: 20px; margin: 0 0 2px; }
 .name { font-weight: 600; font-size: 16px; }
 .chip { display: inline-block; padding: 2px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); font-size: 12.5px; }
 .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
-.active { outline: 2px solid var(--accent); }
-.badge { background: var(--accent); color: var(--accent-ink); font-size: 12px; padding: 2px 9px; border-radius: 999px; font-weight: 600; }
+.led { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 8px; vertical-align: -1px; background: var(--hc, var(--accent)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--hc, var(--accent)) 22%, transparent); }
+.active { outline: 2px solid var(--hc, var(--accent)); }
+.badge { background: var(--hc, var(--accent)); color: var(--accent-ink); font-size: 12px; padding: 2px 9px; border-radius: 999px; font-weight: 600; }
 button, select, input[type=text] {
   font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line);
   border-radius: 8px; padding: 7px 12px; min-height: 36px;
@@ -37,7 +40,8 @@ button, select, input[type=text] {
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.primary { background: var(--hc, var(--accent)); color: var(--accent-ink); border-color: var(--hc, var(--accent)); font-weight: 600; }
+.hint .led { --hc: var(--led3); }
 button.danger { color: var(--bad); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 label.sw { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
@@ -46,12 +50,14 @@ label.sw { display: inline-flex; gap: 8px; align-items: center; cursor: pointer;
 #msg.err { color: var(--bad); }
 h2 { font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 22px 2px 8px; font-weight: 600; }
 .hidden { display: none; }
+.bigcode { font: 700 44px/1.1 ui-monospace, Menlo, monospace; letter-spacing: .12em; text-align: center; margin: 14px 0 4px; font-variant-numeric: tabular-nums; }
+#wizard p { margin: 0 0 6px; }
 input[type=text] { width: 9em; }
 </style>
 </head>
 <body>
 <main>
-  <h1>KVM Hub</h1>
+  <h1>8REC-KM</h1>
   <p class="sub">Settings for your keyboard and mouse switch.</p>
 
   <div id="unsupported" class="card hidden">
@@ -61,14 +67,22 @@ input[type=text] { width: 9em; }
   <div class="card" id="connectCard">
     <div class="row">
       <div class="grow">
-        <div class="name" id="connName">Not connected</div>
-        <div class="hint" id="connHint">Open this page on a computer that is paired with the hub, then press Connect and pick “KVM CMP2”.</div>
+        <div class="name" id="connName">Settings not opened yet</div>
+        <div class="hint" id="connHint">Press Connect and pick “8REC-KM” in the list. This opens the hub’s settings. Your keyboard and mouse keep working either way.</div>
       </div>
       <button class="primary" id="connectBtn">Connect</button>
     </div>
     <div id="msg"></div>
   </div>
 
+  <div id="wizard" class="card hidden"></div>
+  <div id="phoneCard" class="card hidden">
+    <div class="row">
+      <div class="grow"><div class="name">Phone link is open</div>
+      <div class="hint">Anyone nearby can change settings until you close it. It closes by itself after a few minutes. To open it again later, hold Ctrl + Shift on the keyboard and type 8REC.</div></div>
+    </div>
+    <div class="actions"><button class="primary" id="closeSetup">Disconnect phone</button><button id="runSetup">Run setup again</button></div>
+  </div>
   <div id="panel" class="hidden">
     <h2>Computers</h2>
     <div id="hosts"></div>
@@ -96,8 +110,12 @@ input[type=text] { width: 9em; }
     </div>
 
     <h2>Shortcuts</h2>
-    <div class="card hint" style="margin:0">
-      Ctrl + Shift + Left Arrow switches to computer 1, Ctrl + Shift + Right Arrow to computer 2.
+    <div class="card">
+      <div class="hint" style="margin:0 0 12px">Ctrl + Shift + Left Arrow switches to computer 1, Ctrl + Shift + Right Arrow to computer 2.</div>
+      <div class="row"><span class="grow">Switch computer: hold Ctrl + Shift and click mouse button <strong id="swb">-</strong></span><button id="learnSw">Learn…</button></div>
+      <div class="row" style="margin-top:10px"><span class="grow">No-sleep on or off for the active computer: hold Ctrl + Shift and click mouse button <strong id="nsb">-</strong></span><button id="learnNs">Learn…</button></div>
+      <div class="hint" id="learnHint"></div>
+      <div class="hint">No-sleep sends a tiny invisible key tap every 30 seconds so the computer never goes to sleep. On the hub, a red light stays on while computer 1 is selected and a blue light while computer 2 is selected. With no-sleep on, the selected computer's light dips off briefly every 2 seconds, and an unselected computer's light flashes on briefly. The green light shows pairing: it blinks fast while the hub is scanning, slowly while it waits for you to type a code, and is off when pairing is done.</div>
     </div>
   </div>
 </main>
@@ -138,12 +156,38 @@ async function poll() {
 
 function chip(el, text, cls) { el.textContent = text; el.className = "chip " + (cls || ""); }
 
+const STEPS = [
+  { t: "Link the keyboard", code: true, d: "Hold the Easy-Switch button on your MX Keys for 3 seconds until its light blinks fast. When it connects, type this code on the keyboard and press Enter:", ok: (st) => st.kbd, okText: "Keyboard linked" },
+  { t: "Link the mouse", d: "Hold the Easy-Switch button on your MX Master for 3 seconds until its light blinks fast. No code is needed.", ok: (st) => st.mouse, okText: "Mouse linked" },
+  { t: "Connect computer 1", d: "On computer 1, open the Bluetooth settings, remove any old “8REC-KM” or “KVM CMP2” entry, and add “8REC-KM”. No code is needed.", ok: (st) => st.h[0].on, okText: "Computer 1 connected" },
+  { t: "Connect computer 2", d: "Do the same on computer 2: remove any old entry and add “8REC-KM”. No code is needed.", ok: (st) => st.h[1].on, okText: "Computer 2 connected" },
+];
+
+function renderWizard() {
+  const st = state, i = st.step, sp = STEPS[i], w = $("wizard");
+  const code = sp.code && st.code ? '<div class="bigcode" aria-label="code to type">' + String(st.code).padStart(6, "0") + "</div>" : "";
+  w.innerHTML = '<div class="hint" style="margin:0">Step ' + (i + 1) + " of 4</div>" +
+    '<div class="name" style="font-size:20px;margin:2px 0 8px">' + sp.t + "</div>" +
+    "<p>" + sp.d + "</p>" + code +
+    '<div class="row" style="margin-top:12px"><span class="chip ' + (sp.ok(st) ? "ok" : "warn") + '">' + (sp.ok(st) ? "✓ " + sp.okText : "waiting…") + "</span></div>" +
+    '<div class="actions"><button id="skipStep">Skip this step</button></div>';
+  $("skipStep").onclick = () => send("setup 2");
+}
+
 function render() {
   if (!state) return;
+  const wiz = !!(state.setup && state.step < 4);
+  $("wizard").classList.toggle("hidden", !wiz);
+  $("phoneCard").classList.toggle("hidden", !state.setup || wiz);
+  if (wiz) { $("panel").classList.add("hidden"); renderWizard(); return; }
   $("panel").classList.remove("hidden");
   chip($("kbd"), state.kbd ? "connected" : "not connected", state.kbd ? "ok" : "warn");
   chip($("mouse"), state.mouse ? "connected" : "not connected", state.mouse ? "ok" : "warn");
   $("gap").value = String(state.gap);
+  $("swb").textContent = state.sw ? state.sw : "not set";
+  $("nsb").textContent = state.nsb ? state.nsb : "not set";
+  $("learnHint").textContent = state.learn ? "Now press the mouse button you want to use as the " + (state.learn === 1 ? "switch" : "no-sleep") + " button (15 seconds)." : "";
+  $("learnSw").disabled = $("learnNs").disabled = !!state.learn;
   const now = Date.now();
   if (state.pair) pairUntil[state.pair - 1] = pairUntil[state.pair - 1] > now ? pairUntil[state.pair - 1] : now + 120000;
   else pairUntil[0] = pairUntil[1] = 0;
@@ -156,9 +200,11 @@ function render() {
     state.h.forEach((_, i) => {
       const c = document.createElement("div");
       c.className = "card"; c.id = "host" + i;
+      c.style.setProperty("--hc", i === 0 ? "var(--led1)" : "var(--led2)");        // the hub's lights: red = computer 1, blue = computer 2
       c.innerHTML =
-        '<div class="row"><div class="grow"><span class="name"></span> <span class="badge hidden">in use</span></div><span class="chip"></span></div>' +
+        '<div class="row"><div class="grow"><span class="led"></span><span class="name"></span> <span class="badge hidden">in use</span></div><span class="chip"></span></div>' +
         '<div class="row" style="margin-top:10px"><label class="sw"><input type="checkbox" class="swap"> Swap Alt and Command (for a Mac)</label></div>' +
+        '<div class="row" style="margin-top:6px"><label class="sw"><input type="checkbox" class="nos"> Keep awake (no-sleep)</label></div>' +
         '<div class="actions">' +
         '<button class="use primary">Use this computer</button>' +
         '<button class="pair">Pair…</button>' +
@@ -169,6 +215,7 @@ function render() {
       c.querySelector(".use").onclick = () => send("switch " + (i + 1));
       c.querySelector(".pair").onclick = () => { pairUntil[i] = Date.now() + 120000; send("pair " + (i + 1)); };
       c.querySelector(".swap").onchange = (e) => send("swap " + (i + 1) + " " + (e.target.checked ? 1 : 0));
+      c.querySelector(".nos").onchange = (e) => send("nosleep " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".rename").onclick = () => {
         const n = prompt("Name for this computer", state.h[i].n);
         if (n !== null && n.trim()) send("name " + (i + 1) + " " + n.trim().slice(0, 15));
@@ -185,6 +232,7 @@ function render() {
     c.querySelector(".badge").classList.toggle("hidden", !isActive);
     chip(c.querySelector(".chip"), h.on ? "connected" : h.known ? "paired, not connected" : "not paired", h.on ? "ok" : h.known ? "warn" : "bad");
     c.querySelector(".swap").checked = !!h.swap;
+    c.querySelector(".nos").checked = !!h.nos;
     c.querySelector(".use").disabled = isActive || !h.on;
     const open = state.pair === i + 1;
     c.querySelector(".pair").textContent = h.known ? "Pair again…" : "Pair…";
@@ -192,11 +240,16 @@ function render() {
     c.querySelector(".forget").disabled = !h.known;
     const hint = c.querySelector(".pairhint");
     hint.classList.toggle("hidden", !open);
-    if (open) hint.textContent = "Pairing is open for " + Math.max(0, Math.round((pairUntil[i] - now) / 1000)) + " s. On that computer, open Bluetooth settings, forget any old “KVM CMP2” and add “KVM CMP2” again.";
+    if (open) hint.innerHTML = '<span class="led"></span>' + "Pairing is open for " + Math.max(0, Math.round((pairUntil[i] - now) / 1000)) + " s. On that computer, open Bluetooth settings, forget any old “8REC-KM” and add “8REC-KM” again.";
   });
 }
 
 $("gap").onchange = (e) => send("gap " + e.target.value);
+$("learnSw").onclick = () => send("learn 1");
+let userClosed = false;
+$("closeSetup").onclick = () => { userClosed = true; send("setup 0"); };
+$("runSetup").onclick = () => send("setup 1");
+$("learnNs").onclick = () => send("learn 2");
 $("pairMx").onclick = () => { pairMxUntil = Date.now() + 60000; send("pairmx"); };
 
 async function open() {
@@ -204,7 +257,7 @@ async function open() {
   const svc = await server.getPrimaryService(SVC);
   chState = await svc.getCharacteristic(CH_STATE);
   chCmd = await svc.getCharacteristic(CH_CMD);
-  $("connName").textContent = "Connected to " + (device.name || "KVM CMP2");
+  $("connName").textContent = "Settings open on " + (device.name || "8REC-KM");
   $("connHint").textContent = "Changes apply at once and are saved on the hub.";
   $("connectBtn").textContent = "Disconnect";
   clearInterval(timer);
@@ -215,8 +268,8 @@ async function open() {
 function closed() {
   clearInterval(timer); chState = chCmd = null; state = null;
   $("panel").classList.add("hidden"); $("hosts").innerHTML = "";
-  $("connName").textContent = "Not connected";
-  $("connHint").textContent = "Open this page on a computer that is paired with the hub, then press Connect and pick “KVM CMP2”.";
+  $("connName").textContent = "Settings not opened yet";
+  $("connHint").textContent = "Press Connect and pick “8REC-KM” in the list. This opens the hub’s settings. Your keyboard and mouse keep working either way.";
   $("connectBtn").textContent = "Connect";
 }
 
@@ -231,14 +284,31 @@ $("connectBtn").onclick = async () => {
   if (device && device.gatt.connected) { const d = device; device = null; d.gatt.disconnect(); closed(); return; }
   try {
     say("");
-    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "KVM" }], optionalServices: [SVC] });
-    device.addEventListener("gattserverdisconnected", () => { if (device) reconnect(); });
+    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "8REC" }, { namePrefix: "KVM" }], optionalServices: [SVC] });
+    device.addEventListener("gattserverdisconnected", () => { if (userClosed) { userClosed = false; const d = device; device = null; closed(); say("Setup is closed and the phone is disconnected. To open it again, hold Ctrl + Shift on the keyboard and type 8REC."); return; } if (device) reconnect(); });
     await open();
   } catch (e) {
     if (e.name !== "NotFoundError") say("Could not connect: " + e.message + ". The computer must be paired with the hub first.", true);
     if (!(device && device.gatt.connected)) closed();
   }
 };
+// After a reload Chrome can remember the permission (getDevices): reconnect without the chooser when it does.
+(async () => {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  try {
+    const list = await navigator.bluetooth.getDevices();
+    const d = list.find((x) => ((x.name || "").startsWith("8REC") || (x.name || "").startsWith("KVM")));
+    if (!d) return;
+    device = d;
+    device.addEventListener("gattserverdisconnected", () => { if (device) reconnect(); });
+    say("Reconnecting to " + (d.name || "the hub") + "…");
+    await open();
+    say("");
+  } catch (e) {
+    device = null; closed();
+    say("Press Connect to open the settings.");
+  }
+})();
 </script>
 </body>
 </html>

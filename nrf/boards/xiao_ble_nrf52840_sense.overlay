@@ -5,3 +5,4 @@
     };
 };
 &uart0 { status = "okay"; current-speed = <115200>; };
+&nfct { status = "okay"; };                              // NFC tag on the two NFC pads (P0.09 / P0.10)

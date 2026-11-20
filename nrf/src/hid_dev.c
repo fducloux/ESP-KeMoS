@@ -47,8 +47,9 @@ BT_HIDS_DEF(hids, 1, 8, 7, 2);       // report lengths: LED output, keyboard, mo
 
 #define MOUSE_TICK_MS 20            // watchdog and statistics only; sending is paced by completions
 
-// the computers that are connected now; host == -1 means connected but not identified yet
-static struct { struct bt_conn *conn; int host; } hc[NUM_HOSTS];
+// the links that are connected to us as a peripheral. host >= 0: computer 1 or 2; -1: connected but not identified yet; -2: a phone doing setup
+#define NUM_PERIPH (NUM_HOSTS + 1)                // two computers and a phone doing setup
+static struct { struct bt_conn *conn; int host; } hc[NUM_PERIPH];
 static int active_host;
 static int idle_tries[NUM_HOSTS];                // asks to relax an idle computer's link that macOS undid
 
@@ -60,14 +61,18 @@ void links_dump(const char *why);
 static void mouse_tick_fn(struct k_work *w);
 static K_MUTEX_DEFINE(send_lock);       // bt_hids_inp_rep_send must not run from two threads at once
 
-static int find(const struct bt_conn *c) { for (int i = 0; i < NUM_HOSTS; i++) if (hc[i].conn == c) return i; return -1; }
-static int count(void) { int n = 0; for (int i = 0; i < NUM_HOSTS; i++) if (hc[i].conn) n++; return n; }
+static int find(const struct bt_conn *c) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn == c) return i; return -1; }
+static int count(void) { int n = 0; for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn) n++; return n; }
 
 bool hid_dev_is_host_conn(const struct bt_conn *c) { return find(c) >= 0; }
 int hid_dev_host_of(const struct bt_conn *c) { int i = find(c); return i < 0 ? -1 : hc[i].host; }
-struct bt_conn *hid_dev_conn_for(int h) { for (int i = 0; i < NUM_HOSTS; i++) if (hc[i].conn && hc[i].host == h) return hc[i].conn; return NULL; }
+struct bt_conn *hid_dev_conn_for(int h) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == h) return hc[i].conn; return NULL; }
 bool hid_dev_connected(int h) { return hid_dev_conn_for(h) != NULL; }
-struct bt_conn *hid_dev_pending(void) { for (int i = 0; i < NUM_HOSTS; i++) if (hc[i].conn && hc[i].host < 0) return hc[i].conn; return NULL; }
+struct bt_conn *hid_dev_pending(void) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -1) return hc[i].conn; return NULL; }
+// a link that is using the configuration service (a phone during setup): it is not a computer and must not be refused
+void hid_dev_mark_config(struct bt_conn *c) { int i = find(c); if (i >= 0 && hc[i].host == -1) hc[i].host = -2; }
+int hid_dev_disconnect_config(void) { int n = 0; for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -2) { bt_conn_disconnect(hc[i].conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN); n++; } return n; }
+bool hid_dev_config_connected(void) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -2) return true; return false; }
 
 static void leds_handler(struct bt_hids_rep *rep, struct bt_conn *conn, bool write)
 {
@@ -131,7 +136,7 @@ void hid_dev_assign(struct bt_conn *c, int h)
 {
     int i = find(c);
     if (i < 0) return;
-    for (int j = 0; j < NUM_HOSTS; j++)                       // the same computer reconnected: its older link is stale
+    for (int j = 0; j < NUM_PERIPH; j++)                      // the same computer reconnected: its older link is stale
         if (j != i && hc[j].conn && hc[j].host == h) bt_conn_disconnect(hc[j].conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     hc[i].host = h;
     k_work_reschedule(&link_work, K_SECONDS(3));
@@ -167,7 +172,7 @@ static struct bt_le_ext_adv *adv_set;
 // Advertise while there is room for another computer.
 void hid_dev_adv_start(void)
 {
-    if (count() >= NUM_HOSTS) return;
+    if (count() >= NUM_PERIPH) return;
     static int64_t last_fail;
     int64_t now = k_uptime_get();
     if (last_fail && now - last_fail < 500) return;    // never loop: after a failure wait 500 ms
