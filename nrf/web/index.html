@@ -344,11 +344,16 @@ $("connectBtn").onclick = async () => {
   if (device && device.gatt.connected) { const d = device; device = null; d.gatt.disconnect(); closed(); return; }
   try {
     say("");
-    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "8REC" }, { namePrefix: "KVM" }], optionalServices: [SVC] });
+    // A phone has no link to the hub yet and connects through the hub's setup advertisement, which carries the setup service:
+  // filter on that, so only that entry is listed (phones cache the name and would show two devices called 8REC-KM).
+  // A computer that is already paired finds the hub by name.
+  const phone = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  device = await navigator.bluetooth.requestDevice({ filters: phone ? [{ services: [SVC] }] : [{ namePrefix: "8REC" }, { namePrefix: "KVM" }], optionalServices: [SVC] });
     device.addEventListener("gattserverdisconnected", () => { if (userClosed) { userClosed = false; const d = device; device = null; closed(); say("Setup is closed and the phone is disconnected. To open it again, hold Ctrl + Shift on the keyboard and type 8REC."); return; } if (device) reconnect(); });
     await open();
   } catch (e) {
-    if (e.name !== "NotFoundError") say("Could not connect: " + e.message + ". The computer must be paired with the hub first.", true);
+    if (e.name === "NotFoundError" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) && !device) say("No setup device in range. Open setup first: tap the phone on the NFC coil (green LED steady), or power-cycle the hub, or hold Ctrl+Shift on the keyboard and type 8REC.");
+    else if (e.name !== "NotFoundError") say("Could not connect (" + (e.name || "error") + (e.message ? ": " + e.message : "") + "). Open setup first: tap the phone on the NFC coil (green LED steady) or hold Ctrl+Shift and type 8REC, then pick “8REC-KM setup”.", true);
     if (!(device && device.gatt.connected)) closed();
   }
 };

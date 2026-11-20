@@ -21,7 +21,14 @@ The result is `build/nrf/zephyr/zephyr.uf2`. Copy it to the `XIAO-SENSE` drive t
 double tap on the tiny reset button next to the USB-C port. Without touching the board: send `B` on
 the UART console and the firmware reboots into the bootloader.
 
-## UART console (115200 baud, D6 = TX, D7 = RX)
+## Console
+The log and the keys below are on the board's own USB-C port: it shows up as a serial port (`/dev/cu.usbmodem*` on a Mac), 115200 baud,
+no wires needed. For the D6 TX / D7 RX adapter instead, set `zephyr,console` and `zephyr,shell-uart` to `&uart0` in
+`boards/xiao_ble_nrf52840_sense.overlay`. The phone link also has its own advertisement ("8REC-KM setup", its own Bluetooth address,
+no keyboard or mouse appearance) because iPhone apps are unreliable with devices that look like a keyboard. It is on for 5 minutes
+after every power-up or reset, and after an NFC tap or Ctrl+Shift+8REC.
+
+## UART keys
 | Key | Action |
 |-----|--------|
 | `P` | 60 s window to pair the MX Keys or MX Master (put it in pairing mode; the keyboard asks for 123456, the blue LED blinks) |

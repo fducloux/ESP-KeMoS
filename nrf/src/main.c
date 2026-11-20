@@ -599,7 +599,7 @@ static void host_assigned(int h)
 // Works out which computer this link is. `fresh` = pairing just finished (a new bond), so an unknown one may join.
 static void identify_host(struct bt_conn *c, bool fresh)
 {
-    if (hid_dev_host_of(c) >= 0) return;
+    if (hid_dev_host_of(c) >= 0 || hid_dev_host_of(c) == -2) return;     // already known, or the phone
     const bt_addr_le_t *a = bt_conn_get_dst(c);
     for (int h = 0; h < NUM_HOSTS; h++)
         if (host_known(h) && same_addr(&host_addr[h], a)) { hid_dev_assign(c, h); host_assigned(h); return; }
@@ -668,6 +668,7 @@ static void setup_event(int what, int idx)
 static void setup_begin(bool wizard, int minutes)
 {
     setup_open = true;
+    hid_dev_cfg_adv(true);
     setup_until = k_uptime_get() + (int64_t)minutes * 60000;
     LOG_INF("setup open for %d min%s", minutes, wizard ? " (wizard)" : "");
     if (wizard) setup_enter_step(ST_KBD); else setup_step = ST_DONE;
@@ -676,6 +677,7 @@ static void setup_begin(bool wizard, int minutes)
 static void setup_end(void)
 {
     setup_open = false;
+    hid_dev_cfg_adv(false);
     setup_step = ST_DONE;
     gen_code = 0;
     k_work_cancel_delayable(&setup_next_work);
@@ -701,6 +703,11 @@ static void on_connected(struct bt_conn *c, uint8_t err)
         char as[BT_ADDR_LE_STR_LEN]; bt_addr_le_to_str(bt_conn_get_dst(c), as, sizeof(as));
         LOG_INF("computer link up: %s", as);
         hid_dev_conn_open(c);
+        if (hid_dev_is_cfg_conn(c)) {                    // the phone on its setup advertisement: not a computer, never bonded
+            hid_dev_mark_config(c);
+            bt_conn_set_bondable(c, false);
+            LOG_INF("phone link up (setup)");
+        }
         k_work_reschedule(&host_check_work, K_SECONDS(30));
         hid_dev_adv_start_later();                        // room for the other computer
         return;
@@ -1042,6 +1049,7 @@ int main(void)
         static const uint8_t z[6];
         bool fresh = !memcmp(slot_addr[0].a.val, z, 6) && !memcmp(slot_addr[1].a.val, z, 6) && !host_known(0) && !host_known(1) && !host_known(2) && !host_known(3);
         if (fresh) setup_begin(true, 30);
+        else setup_begin(false, 5);              // every power-up or reset: the phone link is open for 5 minutes (the NFC tag or Ctrl+Shift+8REC reopens it later)
     }
     const struct device *con = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
     for (int n = 0;; n++) {

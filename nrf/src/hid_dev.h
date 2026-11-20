@@ -12,6 +12,7 @@ void hid_dev_init(void);
 // make sure the computer-facing identity exists (call after settings_load)
 void hid_dev_id_setup(void);
 void hid_dev_adv_start(void);
+void hid_dev_cfg_adv(bool on);                           // the phone's setup advertisement (own address, not a keyboard), on while setup is open
 void hid_dev_beacon(bool on);                            // the always-on scannable advertisement for the config page
 bool hid_dev_beacon_on(void);
 void hid_dev_adv_start_later(void);     // 300 ms later, from a work item (use after a connection event)
@@ -24,6 +25,7 @@ int  hid_dev_host_of(const struct bt_conn *c);          // 0..NUM_HOSTS-1, or -1
 void hid_dev_swap_hosts(int a, int b);                  // computers a and b trade places (live links follow)
 void hid_dev_assign(struct bt_conn *c, int host);       // c is computer `host`; an older link of it is dropped
 bool hid_dev_connected(int host);
+bool hid_dev_is_cfg_conn(struct bt_conn *c);           // this link came in on the phone's setup advertisement
 void hid_dev_mark_config(struct bt_conn *c);           // this link uses the config service (a phone): keep it
 int  hid_dev_disconnect_config(void);                  // drop every such link, returns how many
 bool hid_dev_config_connected(void);

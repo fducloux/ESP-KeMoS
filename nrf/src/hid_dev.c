@@ -61,6 +61,7 @@ void links_dump(const char *why);
 static void mouse_tick_fn(struct k_work *w);
 static K_MUTEX_DEFINE(send_lock);       // bt_hids_inp_rep_send must not run from two threads at once
 
+static uint8_t cfg_id = 2;                       // identity of the phone's setup advertisement
 static int find(const struct bt_conn *c) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn == c) return i; return -1; }
 static int count(void) { int n = 0; for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn) n++; return n; }
 
@@ -70,6 +71,7 @@ struct bt_conn *hid_dev_conn_for(int h) { for (int i = 0; i < NUM_PERIPH; i++) i
 bool hid_dev_connected(int h) { return hid_dev_conn_for(h) != NULL; }
 struct bt_conn *hid_dev_pending(void) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -1) return hc[i].conn; return NULL; }
 // a link that is using the configuration service (a phone during setup): it is not a computer and must not be refused
+bool hid_dev_is_cfg_conn(struct bt_conn *c) { struct bt_conn_info ci; return !bt_conn_get_info(c, &ci) && ci.id == cfg_id && cfg_id >= 2; }
 void hid_dev_mark_config(struct bt_conn *c) { int i = find(c); if (i >= 0 && hc[i].host == -1) hc[i].host = -2; }
 int hid_dev_disconnect_config(void) { int n = 0; for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -2) { bt_conn_disconnect(hc[i].conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN); n++; } return n; }
 bool hid_dev_config_connected(void) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn && hc[i].host == -2) return true; return false; }
@@ -163,6 +165,7 @@ static const struct bt_data sd[] = {
 
 static uint8_t adv_id = BT_ID_DEFAULT;
 
+
 void hid_dev_id_setup(void)
 {
     bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
@@ -171,6 +174,10 @@ void hid_dev_id_setup(void)
     int id = n >= 2 ? 1 : bt_id_create(NULL, NULL);
     if (id < 0) { LOG_ERR("bt_id_create %d", id); return; }
     adv_id = id;
+    n = CONFIG_BT_ID_MAX;
+    bt_id_get(addrs, &n);
+    int cid = n >= 3 ? 2 : bt_id_create(NULL, NULL);          // a third address for the phone's setup link (it must not look like a keyboard)
+    if (cid < 0) LOG_ERR("bt_id_create (setup) %d", cid); else cfg_id = cid;
     n = CONFIG_BT_ID_MAX;
     bt_id_get(addrs, &n);
     char as[BT_ADDR_LE_STR_LEN]; bt_addr_le_to_str(&addrs[id], as, sizeof(as));
@@ -225,7 +232,37 @@ void hid_dev_beacon(bool on)
 }
 bool hid_dev_beacon_on(void) { return beacon_wanted; }
 
-static void adv_fn(struct k_work *w) { hid_dev_adv_start(); if (beacon_wanted) beacon_start(); }
+// While setup is open: a connectable advertisement for the phone, on its own address and without the keyboard/mouse
+// appearance or the HID service, so a phone's browser treats it as a plain device. It carries the config service UUID.
+static struct bt_le_ext_adv *cfg_set;
+static bool cfg_on;
+static const struct bt_data ad_cfg[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_128_ENCODE(0x5a6f0001, 0x6b76, 0x4d48, 0x8f2e, 0x7d9c1b2a3c4d)),
+};
+static const struct bt_data sd_cfg[] = { BT_DATA(BT_DATA_NAME_COMPLETE, "8REC-KM setup", 13) };
+static void cfg_adv_start(void)
+{
+    if (!cfg_on || count() >= NUM_PERIPH) return;
+    int rc;
+    if (!cfg_set) {
+        struct bt_le_adv_param ap = BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY, 0x00A0, 0x00F0, NULL);   // 100 - 150 ms
+        ap.id = cfg_id;
+        rc = bt_le_ext_adv_create(&ap, NULL, &cfg_set);
+        if (!rc) rc = bt_le_ext_adv_set_data(cfg_set, ad_cfg, ARRAY_SIZE(ad_cfg), sd_cfg, ARRAY_SIZE(sd_cfg));
+        if (rc) { LOG_ERR("setup advertising set %d", rc); cfg_set = NULL; return; }
+    }
+    rc = bt_le_ext_adv_start(cfg_set, BT_LE_EXT_ADV_START_DEFAULT);
+    if (rc && rc != -EALREADY) LOG_ERR("setup advertising start %d", rc);
+    else if (!rc) LOG_INF("advertising for the phone as \"8REC-KM setup\"");
+}
+void hid_dev_cfg_adv(bool on)
+{
+    cfg_on = on;
+    if (on) cfg_adv_start(); else if (cfg_set) bt_le_ext_adv_stop(cfg_set);
+}
+
+static void adv_fn(struct k_work *w) { hid_dev_adv_start(); if (beacon_wanted) beacon_start(); cfg_adv_start(); }
 static K_WORK_DELAYABLE_DEFINE(adv_work, adv_fn);
 // restart after a connection: the controller needs a moment to finish stopping the old set
 void hid_dev_adv_start_later(void) { k_work_reschedule(&adv_work, K_MSEC(300)); }
