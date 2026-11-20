@@ -544,9 +544,55 @@ static void refuse_host(struct bt_conn *c, const char *why)
     forget_bond_both(&a, why);
 }
 
+// A computer that still has its default label ("Computer N") is asked for its own Bluetooth name (the Generic Access
+// Device Name). Computers that you renamed keep your name.
+static struct bt_gatt_read_params name_rd;
+static bool name_busy;
+static uint8_t name_tries[NUM_HOSTS];                            // give up on a computer that will not tell its name
+static void name_read_fn(struct k_work *w);
+static K_WORK_DELAYABLE_DEFINE(name_read_work, name_read_fn);
+
+static uint8_t name_cb(struct bt_conn *c, uint8_t err, struct bt_gatt_read_params *p, const void *data, uint16_t len)
+{
+    int h = hid_dev_host_of(c);
+    if (!err && data && h >= 0 && !strncmp(host_name[h], "Computer ", 9)) {
+        char nm[16]; int j = 0;
+        const uint8_t *d = data;
+        for (int i = 0; i < len && j < 15; i++)                       // letters, digits, space and dash only
+            if (isalnum(d[i]) || d[i] == ' ' || d[i] == '-') nm[j++] = d[i];
+        nm[j] = 0;
+        if (j > 0) {
+            strcpy(host_name[h], nm);
+            char key[3] = { 'n', '0' + h, 0 };
+            kvm_save(key, host_name[h], strlen(host_name[h]));
+            LOG_INF("computer %d is called \"%s\" (its Bluetooth name)", h + 1, nm);
+        }
+    }
+    name_busy = false;
+    k_work_reschedule(&name_read_work, K_SECONDS(1));                 // the next computer that still needs a name
+    return BT_GATT_ITER_STOP;
+}
+
+static void name_read_fn(struct k_work *w)
+{
+    if (name_busy) return;
+    for (int h = 0; h < NUM_HOSTS; h++) {
+        struct bt_conn *c = hid_dev_conn_for(h);
+        if (!c || strncmp(host_name[h], "Computer ", 9) || name_tries[h] >= 2) continue;
+        name_tries[h]++;
+        name_rd = (struct bt_gatt_read_params){ .func = name_cb, .by_uuid = { .uuid = BT_UUID_GAP_DEVICE_NAME, .start_handle = 0x0001, .end_handle = 0xffff } };
+        name_busy = true;
+        int rc = bt_gatt_read(c, &name_rd);
+        if (rc) { name_busy = false; LOG_INF("computer %d name read failed (%d)", h + 1, rc); }
+        return;
+    }
+}
+
 static void host_assigned(int h)
 {
     LOG_INF("computer %d connected%s", h + 1, h == active ? " (active)" : "");
+    name_tries[h] = 0;
+    k_work_reschedule(&name_read_work, K_SECONDS(3));
     if (h == active) { hid_dev_set_active(h); send_keys(); forward_leds(); }
 }
 
@@ -860,7 +906,7 @@ void cfg_command(const char *cmd)
         if (p) p = strchr(p + 1, ' ');
         char tmp[16];
         json_name(tmp, sizeof(tmp), p ? p + 1 : "");
-        if (!tmp[0]) snprintf(tmp, sizeof(tmp), "Computer %d", a);
+        if (!tmp[0]) { snprintf(tmp, sizeof(tmp), "Computer %d", a); name_tries[h] = 0; k_work_reschedule(&name_read_work, K_MSEC(300)); }   // empty: use its Bluetooth name
         strcpy(host_name[h], tmp);
         char key[3] = { 'n', '0' + h, 0 };
         kvm_save(key, host_name[h], strlen(host_name[h]));

@@ -268,8 +268,8 @@ function render() {
       c.querySelector(".swap").onchange = (e) => send("swap " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".nos").onchange = (e) => send("nosleep " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".rename").onclick = () => {
-        const n = prompt("Name for this computer", state.h[i].n);
-        if (n !== null && n.trim()) send("name " + (i + 1) + " " + n.trim().slice(0, 15));
+        const n = prompt("Name for this computer (leave empty to use its own Bluetooth name)", state.h[i].n);
+        if (n !== null) send("name " + (i + 1) + " " + n.trim().slice(0, 15));
       };
       c.querySelector(".forget").onclick = () => {
         if (confirm("Forget " + state.h[i].n + "? It has to be paired again to use the hub.")) send("forget " + (i + 1));
