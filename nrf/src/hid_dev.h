@@ -40,7 +40,10 @@ int hid_dev_send_consumer(int host, uint16_t usage);
 void hid_dev_set_active(int host);
 void hid_dev_set_resample(bool on);
 bool hid_dev_toggle_resample(void);                     // even-out mode for the pointer; returns the new state
-void hid_dev_set_mouse_gap(int ms);
+void hid_dev_set_mouse_gap(int ms);                      // all computers
+void hid_dev_set_host_mouse(int h, int gap, bool even);   // one computer: report spacing in ms and "even out"
+int hid_dev_host_gap(int h);
+bool hid_dev_host_even(int h);
 int hid_dev_get_mouse_gap(void);
 void hid_dev_stroke(int per, int n, int ms, int reps);   // diagnosis only
 void hid_dev_print_totals(void);                        // movement counted in and out since boot, for the stops test

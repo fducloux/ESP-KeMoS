@@ -63,6 +63,8 @@ static bt_addr_le_t host_addr[NUM_HOSTS];
 static uint8_t mod_swap = 1;                 // computer 1 is a Mac by default
 static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2", "Computer 3", "Computer 4" };   // labels for the config page
 static int mouse_gap_saved = -1;
+static struct { uint8_t gap[NUM_HOSTS]; uint8_t even; } mouse_saved;     // per computer: report spacing (ms) and "even out" bits
+static bool mouse_saved_ok;
 static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
 static uint8_t nosleep_bits;                 // bit per computer: a Left Shift tap every 30 s keeps it awake
 static char why_log[96];                     // last bond removals with their reason, kept in flash (UART key W)
@@ -73,6 +75,7 @@ static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_a
     if (!strcmp(name, "btn")) { uint8_t b[2] = {0}; int r = rd(cb_arg, b, 2); if (r >= 2) { sw_btn = b[0]; ns_btn = b[1]; } return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "ns")) return rd(cb_arg, &nosleep_bits, 1) < 0 ? -EIO : 0;
     if (!strcmp(name, "why")) { int r = rd(cb_arg, why_log, sizeof(why_log) - 1); why_log[r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
+    if (!strcmp(name, "mouse")) { int r = rd(cb_arg, &mouse_saved, sizeof(mouse_saved)); mouse_saved_ok = r == sizeof(mouse_saved); return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
     if (name[0] == 'n' && name[1] >= '0' && name[1] < '0' + NUM_HOSTS && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if ((name[0] != 's' && name[0] != 'h') || name[1] < '0' || name[2]) return -ENOENT;
@@ -87,6 +90,11 @@ static void kvm_save(const char *key, const void *v, size_t n)
     char path[16];
     snprintf(path, sizeof(path), "kvm/%s", key);
     settings_save_one(path, v, n);
+}
+static void mouse_save(void)
+{
+    for (int h = 0; h < NUM_HOSTS; h++) { mouse_saved.gap[h] = hid_dev_host_gap(h); if (hid_dev_host_even(h)) mouse_saved.even |= 1 << h; else mouse_saved.even &= ~(1 << h); }
+    kvm_save("mouse", &mouse_saved, sizeof(mouse_saved));
 }
 // Every bond removal goes through here so a lost pairing can be traced after a power cycle.
 static int unpair_why(uint8_t id, const bt_addr_le_t *a, const char *why)
@@ -836,8 +844,8 @@ int cfg_status(char *buf, size_t n)
     for (int h = 0; h < NUM_HOSTS && o > 0 && o < (int)n; h++) {
         char nm[20];
         json_name(nm, sizeof(nm), host_name[h]);
-        o += snprintf(buf + o, n - o, "%s{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d}", h ? "," : "", nm,
-                      host_known(h), hid_dev_connected(h), (mod_swap >> h) & 1, (nosleep_bits >> h) & 1);
+        o += snprintf(buf + o, n - o, "%s{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d,\"g\":%d,\"e\":%d}", h ? "," : "", nm,
+                      host_known(h), hid_dev_connected(h), (mod_swap >> h) & 1, (nosleep_bits >> h) & 1, hid_dev_host_gap(h), hid_dev_host_even(h));
     }
     if (o > 0 && o < (int)n - 3) o += snprintf(buf + o, n - o, "]}");
     return o;
@@ -862,6 +870,7 @@ static void move_host(int a, int b)
     }
     kvm_save("swap", &mod_swap, 1);
     kvm_save("ns", &nosleep_bits, 1);
+    mouse_save();
     LOG_INF("positions %d and %d traded places", a + 1, b + 1);
 }
 
@@ -903,10 +912,12 @@ void cfg_command(const char *cmd)
     else if (!strcmp(word, "stroke")) {            // "stroke <per> <n> <ms> <reps>" (diagnosis)
         int per = 0, n = 0, ms = 0, reps = 0;
         if (sscanf(cmd, "%*s %d %d %d %d", &per, &n, &ms, &reps) == 4) hid_dev_stroke(per, n, ms, reps);
-    } else if (!strcmp(word, "gap")) {
-        hid_dev_set_mouse_gap(a);
-        int g = hid_dev_get_mouse_gap();
-        kvm_save("gap", &g, sizeof(g));
+    } else if (!strcmp(word, "mgap") && valid) {            // "mgap 2 15": computer 2 gets 15 ms between mouse reports
+        hid_dev_set_host_mouse(h, b, hid_dev_host_even(h)); mouse_save();
+    } else if (!strcmp(word, "meven") && valid) {           // "meven 2 1": computer 2 evens out big steps
+        hid_dev_set_host_mouse(h, hid_dev_host_gap(h), b != 0); mouse_save();
+    } else if (!strcmp(word, "gap")) {                      // all computers
+        hid_dev_set_mouse_gap(a); mouse_save();
     } else if (!strcmp(word, "forget") && valid) forget_host(h);
     else if (!strcmp(word, "name") && valid) {
         const char *p = strchr(cmd, ' ');                 // "name 1 Mac": the rest of the line after the number
@@ -1032,7 +1043,8 @@ int main(void)
     hid_dev_init();
     hid_dev_set_reroll(mouse_reroll);
     hid_dev_id_setup();
-    if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);
+    if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);       // older single setting: all computers
+    if (mouse_saved_ok) for (int h = 0; h < NUM_HOSTS; h++) hid_dev_set_host_mouse(h, mouse_saved.gap[h], (mouse_saved.even >> h) & 1);
     bt_conn_auth_cb_register(&auth_cbs);
     bt_conn_auth_info_cb_register(&auth_info);
     for (int i = 0; i < NUM_INPUTS; i++) {

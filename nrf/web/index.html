@@ -104,20 +104,6 @@ input[type=text] { width: 9em; }
       <div class="hint" id="pairMxHint">Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). The keyboard asks for the code 123456.</div>
     </div>
 
-    <h2>Mouse feel</h2>
-    <div class="card">
-      <div class="row">
-        <span class="grow">Space between mouse reports</span>
-        <select id="gap">
-          <option value="0">0 ms (as fast as possible)</option>
-          <option value="8">8 ms (recommended)</option>
-          <option value="15">15 ms</option>
-          <option value="22">22 ms</option>
-        </select>
-      </div>
-      <div class="hint">Try 8 ms first. If the pointer feels uneven on one computer, try another value.</div>
-    </div>
-
     <h2>Shortcuts</h2>
     <div class="card">
       <div class="hint" style="margin:0 0 12px">Ctrl + Shift + Left Arrow switches to computer 1, Ctrl + Shift + Right Arrow to computer 2.</div>
@@ -231,7 +217,6 @@ function render() {
   $("panel").classList.remove("hidden");
   chip($("kbd"), state.kbd ? "connected" : "not connected", state.kbd ? "ok" : "warn");
   chip($("mouse"), state.mouse ? "connected" : "not connected", state.mouse ? "ok" : "warn");
-  $("gap").value = String(state.gap);
   $("swb").textContent = state.sw ? state.sw : "not set";
   $("nsb").textContent = state.nsb ? state.nsb : "not set";
   $("learnHint").textContent = state.learn ? "Now press the mouse button you want to use as the " + (state.learn === 1 ? "switch" : "no-sleep") + " button (15 seconds)." : "";
@@ -254,6 +239,9 @@ function render() {
         '<div class="row"><div class="grow"><span class="grip" title="Drag to change the order">&#8942;&#8942;</span><span class="num"></span><span class="name"></span> <span class="badge hidden">in use</span> <span class="pos"></span></div><span class="chip"></span></div>' +
         '<div class="row" style="margin-top:10px"><label class="sw"><input type="checkbox" class="swap"> Swap Alt and Command (for a Mac)</label></div>' +
         '<div class="row" style="margin-top:6px"><label class="sw"><input type="checkbox" class="nos"> Keep awake (no-sleep)</label></div>' +
+        '<div class="row" style="margin-top:10px"><span class="grow">Mouse: space between reports</span><select class="mgap">' +
+        '<option value="0">0 ms (fastest)</option><option value="8">8 ms (default)</option><option value="15">15 ms</option><option value="22">22 ms</option></select></div>' +
+        '<div class="row" style="margin-top:6px"><label class="sw"><input type="checkbox" class="meven"> Mouse: even out big steps</label></div>' +
         '<div class="actions">' +
         '<button class="use primary">Use this computer</button>' +
 
@@ -266,6 +254,8 @@ function render() {
       attachDrag(c, i);
       c.querySelector(".pair").onclick = () => { pairUntil[i] = Date.now() + 120000; send("pair " + (i + 1)); };
       c.querySelector(".swap").onchange = (e) => send("swap " + (i + 1) + " " + (e.target.checked ? 1 : 0));
+      c.querySelector(".mgap").onchange = (e) => send("mgap " + (i + 1) + " " + e.target.value);
+      c.querySelector(".meven").onchange = (e) => send("meven " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".nos").onchange = (e) => send("nosleep " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".rename").onclick = () => {
         const n = prompt("Name for this computer (leave empty to use its own Bluetooth name)", state.h[i].n);
@@ -293,6 +283,8 @@ function render() {
     chip(c.querySelector(".chip"), h.on ? "connected" : h.known ? "paired, not connected" : "not paired", h.on ? "ok" : h.known ? "warn" : "bad");
     c.querySelector(".swap").checked = !!h.swap;
     c.querySelector(".nos").checked = !!h.nos;
+    if (document.activeElement !== c.querySelector(".mgap")) c.querySelector(".mgap").value = String(h.g);
+    c.querySelector(".meven").checked = !!h.e;
     c.querySelector(".use").disabled = isActive || !h.on;
     const open = state.pair === i + 1;
     c.querySelector(".pair").textContent = h.known ? "Pair again…" : "Pair…";
@@ -304,7 +296,6 @@ function render() {
   });
 }
 
-$("gap").onchange = (e) => send("gap " + e.target.value);
 $("learnSw").onclick = () => send("learn 1");
 let userClosed = false;
 $("closeSetup").onclick = () => { userClosed = true; send("setup 0"); };

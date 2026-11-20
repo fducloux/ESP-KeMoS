@@ -61,6 +61,10 @@ void links_dump(const char *why);
 static void mouse_tick_fn(struct k_work *w);
 static K_MUTEX_DEFINE(send_lock);       // bt_hids_inp_rep_send must not run from two threads at once
 
+// Per computer (each OS treats the pointer differently): the minimum time between mouse reports (0 = as soon as the previous one
+// is out; 8 ms felt best on the Mac) and "even out": spread a big pending step over two reports so the steps stay even.
+static volatile int host_gap[NUM_HOSTS] = { 8, 8, 8, 8 };
+static volatile bool host_rs[NUM_HOSTS];
 static uint8_t cfg_id = 2;                       // identity of the phone's setup advertisement
 static int find(const struct bt_conn *c) { for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn == c) return i; return -1; }
 static int count(void) { int n = 0; for (int i = 0; i < NUM_PERIPH; i++) if (hc[i].conn) n++; return n; }
@@ -151,6 +155,8 @@ void hid_dev_swap_hosts(int a, int b)
         if (hc[i].host == a) hc[i].host = b; else if (hc[i].host == b) hc[i].host = a;
     }
     int t = idle_tries[a]; idle_tries[a] = idle_tries[b]; idle_tries[b] = t;
+    t = host_gap[a]; host_gap[a] = host_gap[b]; host_gap[b] = t;
+    bool tr = host_rs[a]; host_rs[a] = host_rs[b]; host_rs[b] = tr;
     if (active_host == a) active_host = b; else if (active_host == b) active_host = a;
 }
 
@@ -303,8 +309,7 @@ static void (*reroll_cb)(void);                // asks main.c to re-set the mous
 static unsigned win_gaps, win_slow, rerolls;
 static int64_t win_start, last_reroll;
 static unsigned in_gap_hist[7];            // gaps between mouse reports at the hub: <=4, <=9, <=14, <=19, <=29, <=49, >49 ms (only while moving)
-static volatile bool mouse_resample;       // spread each burst of movement over two steps so the steps stay even (UART key Z)
-static volatile int mouse_gap_ms = 8;     // minimum time between mouse reports (0 = as soon as the previous one is out); 8 ms felt best on the Mac
+
 static int64_t last_send_ms;
 static atomic_t inflight;                 // a mouse notification is queued and not yet sent over the air
 static int64_t inflight_since;
@@ -323,7 +328,7 @@ static void mouse_flush(void)
     if (!c) return;
     k_mutex_lock(&send_lock, K_FOREVER);
     if (atomic_get(&inflight)) { k_mutex_unlock(&send_lock); return; }
-    int gap = mouse_gap_ms;
+    int gap = host_gap[active_host];
     if (gap) {                                          // keep the reports evenly spaced
         int64_t wait = last_send_ms + gap - k_uptime_get();
         if (wait > 0) { k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(wait)); k_mutex_unlock(&send_lock); return; }
@@ -332,7 +337,7 @@ static void mouse_flush(void)
     int dx = clamp16(mac.dx), dy = clamp16(mac.dy), wh = clamp8(mac.wheel), pn = clamp8(mac.pan);
     uint8_t b = mac.buttons;
     irq_unlock(key);
-    if (mouse_resample) {                               // send half of what is pending (rounded up); the rest follows on the next step
+    if (host_rs[active_host]) {                         // send half of what is pending (rounded up); the rest follows on the next step
         dx = dx > 0 ? (dx + 1) / 2 : dx < 0 ? (dx - 1) / 2 : 0;
         dy = dy > 0 ? (dy + 1) / 2 : dy < 0 ? (dy - 1) / 2 : 0;
     }
@@ -383,18 +388,22 @@ static void mouse_tick_fn(struct k_work *w)
     k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(MOUSE_TICK_MS));
 }
 
-void hid_dev_set_resample(bool on) { mouse_resample = on; }
-bool hid_dev_toggle_resample(void) { mouse_resample = !mouse_resample; return mouse_resample; }
-void hid_dev_set_mouse_gap(int ms) { mouse_gap_ms = ms < 0 ? 0 : ms > 40 ? 40 : ms; }
-int hid_dev_get_mouse_gap(void) { return mouse_gap_ms; }
+static int clamp_gap(int ms) { return ms < 0 ? 0 : ms > 40 ? 40 : ms; }
+void hid_dev_set_resample(bool on) { for (int h = 0; h < NUM_HOSTS; h++) host_rs[h] = on; }       // all computers (diagnosis keys)
+bool hid_dev_toggle_resample(void) { host_rs[active_host] = !host_rs[active_host]; return host_rs[active_host]; }
+void hid_dev_set_mouse_gap(int ms) { for (int h = 0; h < NUM_HOSTS; h++) host_gap[h] = clamp_gap(ms); }   // all computers
+int hid_dev_get_mouse_gap(void) { return host_gap[active_host]; }
+void hid_dev_set_host_mouse(int h, int gap, bool even) { if (h >= 0 && h < NUM_HOSTS) { host_gap[h] = clamp_gap(gap); host_rs[h] = even; } }
+int hid_dev_host_gap(int h) { return host_gap[h]; }
+bool hid_dev_host_even(int h) { return host_rs[h]; }
 
 int hid_dev_cycle_mouse_gap(void)
 {
     static const int gaps[] = { 0, 8, 15, 22 };
     static int i = 1;                                   // 8 ms is the default
     i = (i + 1) % ARRAY_SIZE(gaps);
-    mouse_gap_ms = gaps[i];
-    return mouse_gap_ms;
+    host_gap[active_host] = gaps[i];
+    return host_gap[active_host];
 }
 
 // diagnosis: +1/-1 count at 100 Hz for a few seconds (no net movement), so delivery timing can be measured without a hand
