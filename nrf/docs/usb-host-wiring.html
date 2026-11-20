@@ -1,0 +1,150 @@
+<title>UHS Mini Wiring</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: one column. Board drawing first, wiring table second, checks last. */
+:root {
+  --bg: #f5f6f4; --fg: #1c2321; --muted: #5d6a66; --line: #d6dcd9; --card: #ffffff;
+  --pcb: #1f4f8f; --pcb-edge: #163a69; --pad: #e8c765; --pad-ink: #3b2f05;
+  --chip: #2b2f33; --metal: #b9c0c6; --accent: #0f7a5c; --warn: #b4531a; --warn-bg: #fbeee3;
+  --wire-3v: #c0392b; --wire-gnd: #2c3e50; --wire-sig: #1d6fb8; --wire-5v: #d68910;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121615; --fg: #e4ebe8; --muted: #93a39d; --line: #2c3532; --card: #1a201e;
+    --pcb: #2a63ad; --pcb-edge: #1b4a86; --pad: #e8c765; --pad-ink: #2b2204;
+    --chip: #0d0f10; --metal: #8d969c; --accent: #3ccf9f; --warn: #f0a068; --warn-bg: #2d2118;
+    --wire-3v: #ef6a5a; --wire-gnd: #9fb3c7; --wire-sig: #5fb0f0; --wire-5v: #f0b13e;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121615; --fg: #e4ebe8; --muted: #93a39d; --line: #2c3532; --card: #1a201e;
+  --pcb: #2a63ad; --pcb-edge: #1b4a86; --pad: #e8c765; --pad-ink: #2b2204;
+  --chip: #0d0f10; --metal: #8d969c; --accent: #3ccf9f; --warn: #f0a068; --warn-bg: #2d2118;
+  --wire-3v: #ef6a5a; --wire-gnd: #9fb3c7; --wire-sig: #5fb0f0; --wire-5v: #f0b13e;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+h1 { font-size: 22px; margin: 0; text-wrap: balance; }
+h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 650; }
+p { margin: 0; }
+.sub { color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.scroll { overflow-x: auto; }
+svg { display: block; width: 100%; min-width: 560px; height: auto; }
+svg text { font: 11px system-ui, sans-serif; fill: var(--fg); }
+svg .mut { fill: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
+.warn { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 10px; padding: 12px 14px; }
+.warn strong { color: var(--warn); }
+ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; }
+code { font: 13px ui-monospace, Menlo, monospace; background: var(--line); padding: 1px 5px; border-radius: 4px; }
+</style>
+
+<main>
+  <div>
+    <h1>UHS Mini wiring to the XIAO nRF52840</h1>
+    <p class="sub">HW-244 "UHS mini v2.0" (MAX3421E USB host). Drawing is simplified and not to scale; pad names come from the seller's pinout photo.</p>
+  </div>
+
+  <section class="card">
+    <h2>The board, seen from the component side</h2>
+    <div class="scroll">
+    <svg viewBox="0 0 640 330" role="img" aria-label="HW-244 board with the USB socket on the left, the signal pads along the bottom, and the VCC pad next to the socket highlighted">
+      <!-- board -->
+      <rect x="40" y="70" width="470" height="170" rx="6" fill="var(--pcb)" stroke="var(--pcb-edge)" stroke-width="2"/>
+      <!-- USB-A socket -->
+      <rect x="14" y="100" width="92" height="110" rx="4" fill="var(--metal)" stroke="var(--pcb-edge)"/>
+      <rect x="30" y="118" width="62" height="26" fill="var(--chip)"/><rect x="30" y="166" width="62" height="26" fill="var(--chip)"/>
+      <text x="60" y="226" text-anchor="middle" class="mut">USB-A (dongle here)</text>
+      <!-- chip + crystal -->
+      <rect x="232" y="118" width="62" height="62" rx="3" fill="var(--chip)"/><text x="263" y="153" text-anchor="middle" style="fill:#c9d3d8">MAX3421E</text>
+      <rect x="140" y="170" width="58" height="26" rx="3" fill="var(--metal)"/><text x="169" y="187" text-anchor="middle" style="fill:#1c2321">crystal</text>
+
+      <!-- top pad rows (left: near socket) -->
+      <g fill="var(--pad)" stroke="var(--pad-ink)">
+        <circle cx="132" cy="92" r="7"/><circle cx="162" cy="92" r="7"/><circle cx="192" cy="92" r="7"/><circle cx="222" cy="92" r="7"/><circle cx="252" cy="92" r="7"/>
+        <circle cx="400" cy="92" r="7"/><circle cx="430" cy="92" r="7"/>
+        <circle cx="132" cy="116" r="7"/><circle cx="162" cy="116" r="7"/><circle cx="192" cy="116" r="7"/><circle cx="222" cy="116" r="7"/>
+      </g>
+      <text x="132" y="62" text-anchor="middle">INT</text>
+      <text x="162" y="62" text-anchor="middle" style="font-weight:700">VCC</text>
+      <text x="192" y="62" text-anchor="middle">INT</text>
+      <text x="222" y="62" text-anchor="middle">GPX</text>
+      <text x="252" y="62" text-anchor="middle">SS</text>
+      <text x="400" y="62" text-anchor="middle">GND</text><text x="430" y="62" text-anchor="middle">RST</text>
+      <!-- highlighted VCC pad: the power pad -->
+      <circle cx="162" cy="92" r="15" fill="none" stroke="var(--warn)" stroke-width="3" stroke-dasharray="5 3"/>
+      <text x="162" y="44" text-anchor="middle" style="fill:var(--warn);font-weight:700">VCC = USB power pad</text>
+
+      <!-- bottom signal row -->
+      <g fill="var(--pad)" stroke="var(--pad-ink)">
+        <circle cx="122" cy="224" r="7"/><circle cx="152" cy="224" r="7"/><circle cx="182" cy="224" r="7"/><circle cx="212" cy="224" r="7"/>
+        <circle cx="242" cy="224" r="7"/><circle cx="272" cy="224" r="7"/><circle cx="302" cy="224" r="7"/><circle cx="332" cy="224" r="7"/>
+        <circle cx="362" cy="224" r="7"/><circle cx="392" cy="224" r="7"/><circle cx="422" cy="224" r="7"/><circle cx="452" cy="224" r="7"/>
+      </g>
+      <g text-anchor="middle">
+        <text x="122" y="262">SS</text><text x="152" y="262">MOSI</text><text x="182" y="262">MISO</text><text x="212" y="262">SCLK</text>
+        <text x="362" y="262">3.3V</text><text x="422" y="262">GND</text>
+      </g>
+      <text x="122" y="276" text-anchor="middle" class="mut">(D10)</text>
+      <!-- wires to XIAO labels -->
+      <g font-size="11" text-anchor="middle">
+        <text x="122" y="298" style="fill:var(--wire-sig)">D1</text><text x="152" y="298" style="fill:var(--wire-sig)">D10</text>
+        <text x="182" y="298" style="fill:var(--wire-sig)">D9</text><text x="212" y="298" style="fill:var(--wire-sig)">D8</text>
+        <text x="362" y="298" style="fill:var(--wire-3v)">3V3</text><text x="422" y="298" style="fill:var(--wire-gnd)">GND</text>
+        <text x="132" y="140" style="fill:var(--wire-sig)">D2</text><text x="400" y="116" style="fill:var(--wire-gnd)">(GND)</text>
+        <text x="430" y="116" style="fill:var(--wire-sig)">D3</text><text x="162" y="30" style="fill:var(--wire-5v);font-weight:700">XIAO 5V pin</text>
+      </g>
+      <text x="470" y="298" class="mut" text-anchor="start">orange/blue/red = wire colour used below</text>
+    </svg>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Wiring</h2>
+    <table>
+      <thead><tr><th>Board pad</th><th>XIAO pin</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><span class="dot" style="background:var(--wire-3v)"></span>3.3V</td><td>3V3</td><td>powers the chip and its logic</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-gnd)"></span>GND</td><td>GND</td><td>ground</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>SCLK</td><td>D8</td><td>SPI clock</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>MISO</td><td>D9</td><td>SPI data from the chip</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>MOSI</td><td>D10</td><td>SPI data to the chip</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>SS</td><td>D1</td><td>chip select</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>INT</td><td>D2</td><td>interrupt (active low)</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-sig)"></span>RST</td><td>D3</td><td>reset (optional, recommended)</td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-5v)"></span>VCC (USB power pad)</td><td>5V pin</td><td>5 V for the dongle, <strong>only after the cut below</strong></td></tr>
+      </tbody>
+    </table>
+    <p class="sub" style="margin-top:8px">D6 and D7 stay free for the console. GPX and the GPIN/GPOUT headers stay unconnected.</p>
+  </section>
+
+  <section class="warn">
+    <h2 style="color:var(--warn)">The cut: what I know and what I don't</h2>
+    <p><strong>What the seller says:</strong> cut the yellow-marked trace, then feed 5 V to the VCC pad. This separates the USB socket's power from the board's 3.3 V rail, so the chip stays at 3.3 V and the dongle gets 5 V.</p>
+    <p style="margin-top:8px"><strong>What I could not confirm:</strong> none of the listing photos I saw shows the yellow mark, so I can't point to the exact trace. It should be a thin trace or a solder-bridge near the VCC pad next to the USB socket (on the back of the board the pad is labelled VBUS). Find it on your board before cutting, and send me a close-up photo of that corner if you are unsure. It might also not be cuttable; the fallback is at the end.</p>
+  </section>
+
+  <section class="card">
+    <h2>Before you power it</h2>
+    <ol>
+      <li>Set a multimeter to continuity. Touch the VCC pad and the board's 3.3V pad. If they beep, the two are tied together: that is the trace to cut.</li>
+      <li>Cut only that trace (a hobby knife, two or three cuts). Check again: VCC and 3.3V must no longer beep.</li>
+      <li>Solder a wire from the XIAO's 5V pin to the VCC pad. Wire everything else from the table.</li>
+      <li>Power it from the Mac and measure with the board connected: the 3.3V pad reads about 3.3 V, the VCC pad about 5 V, and SCLK, MOSI, MISO, SS, INT and RST never read 5 V.</li>
+    </ol>
+    <p class="sub" style="margin-top:10px">If anything reads 5 V on a signal pad, unplug it and send me the readings. Never connect the VCC pad to 3.3 V, and never feed 5 V into a board whose 3.3V pad is still tied to VCC.</p>
+  </section>
+
+  <section class="card">
+    <h2>If the trace cannot be cut</h2>
+    <p>Do not feed 5 V into the VCC pad then. Instead, power the dongle through a separate USB-A breakout wired to the XIAO's 5V pin, or lift the USB socket's power leg. Tell me what you find and I will adapt the plan.</p>
+  </section>
+</main>
