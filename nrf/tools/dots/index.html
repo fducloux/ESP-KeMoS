@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dot Test</title>
+<style>
+:root { --bg:#14181b; --fg:#e8edef; --muted:#8c9aa1; --dot:#ff8a3d; --ok:#4fd1a1; --bad:#ff6b6b; --line:#2a3238; --trace:#5fb0f0; }
+@media (prefers-color-scheme: light) { :root { --bg:#f4f6f5; --fg:#182024; --muted:#5d6b72; --dot:#d9620f; --ok:#0e8a63; --bad:#c0392b; --line:#d5dcdf; --trace:#2b6fb3; } }
+* { box-sizing:border-box; }
+html,body { height:100%; margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; overflow:hidden; }
+#bar { position:fixed; inset:0 0 auto 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--bg); z-index:2; }
+#bar label { color:var(--muted); }
+select,input,button { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
+button.go { background:var(--ok); color:#06150f; border-color:var(--ok); font-weight:650; cursor:pointer; }
+input[type=number] { width:4.5em; }
+#hud { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; }
+canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+#panel { position:fixed; inset:64px 0 0 0; padding:18px 22px; overflow:auto; z-index:1; background:var(--bg); }
+#panel table { border-collapse:collapse; font-variant-numeric:tabular-nums; margin:10px 0 18px; }
+#panel th,#panel td { text-align:left; padding:5px 18px 5px 0; border-bottom:1px solid var(--line); }
+#panel th { color:var(--muted); font-weight:600; font-size:12px; }
+.hide { display:none; }
+.muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <label>Mouse path <select id="label">
+    <option value="unifying">Unifying dongle (reference)</option>
+    <option value="hub">Through the hub</option>
+    <option value="other">Other</option>
+  </select></label>
+  <label>Test <select id="mode"><option value="dots">Click the dots</option><option value="circles">Circles (stops at 20)</option>
+    <option value="stops">Stops: slide between two fixed stops (40 strokes)</option></select></label>
+  <label><input type="checkbox" id="raw"> Raw mode (no acceleration)</label>
+  <label>Dots <input type="number" id="count" value="30" min="5" max="100"></label>
+  <label id="gainL" class="hide">Raw gain <input type="number" id="gain" value="0.5" step="0.1" min="0.1" max="5"></label>
+  <button class="go" id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+  <span id="hud">Same mouse, same Mac pointer speed in every run.</span>
+</div>
+<canvas id="c"></canvas>
+<div id="panel" class="hide"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $("c"), ctx = cv.getContext("2d");
+const R = 18;                                    // dot radius in px
+let W = 0, H = 0, running = false, raw = false, gain = 0.5;
+let dots = [], idx = 0, target = null, cursor = { x: 0, y: 0 }, last = null;
+let events = [], trials = [], trialStart = null, misses = 0, t0 = 0;
+
+function size() { W = innerWidth; H = innerHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio; ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); }
+addEventListener("resize", size); size();
+$("raw").onchange = () => $("gainL").classList.toggle("hide", !$("raw").checked);
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+function makeDots(n) {                           // random positions, always a decent hop from the previous one
+  const out = []; let p = { x: W / 2, y: H / 2 };
+  for (let i = 0; i < n; i++) {
+    let q, tries = 0;
+    do { q = { x: rnd(60, W - 60), y: rnd(110, H - 60) }; tries++; } while (Math.hypot(q.x - p.x, q.y - p.y) < 220 && tries < 50);
+    out.push(q); p = q;
+  }
+  return out;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.lineWidth = 1; ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--trace"); ctx.globalAlpha = .35;
+  if (events.length > 1) { ctx.beginPath(); ctx.moveTo(events[0][1], events[0][2]); for (const e of events) ctx.lineTo(e[1], e[2]); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  if (target) { ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--dot"); ctx.beginPath(); ctx.arc(target.x, target.y, R, 0, 7); ctx.fill(); }
+  if (circles && running) { ctx.save(); ctx.font = "700 64px system-ui"; ctx.textAlign = "center"; ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted"); ctx.globalAlpha = .5; ctx.fillText((cAng / (2 * Math.PI)).toFixed(1) + " / 20", W / 2, 150); ctx.restore(); }
+  if (raw) { ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.beginPath(); ctx.moveTo(cursor.x, cursor.y); ctx.lineTo(cursor.x + 11, cursor.y + 11); ctx.lineTo(cursor.x + 4, cursor.y + 12); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+}
+
+function record(x, y, t, dx, dy) { events.push([+(t - t0).toFixed(2), +x.toFixed(1), +y.toFixed(1), dx, dy]); }
+
+function stopsStep(dx) {                          // horizontal strokes between two stops, from the raw counts
+  sPos += dx;
+  if (sDir === 0) { if (Math.abs(sPos - sExt) > 600) { sDir = sPos > sExt ? 1 : -1; sStart = sExt; } else if (!sExt) sExt = sPos; return; }
+  if (sDir * (sPos - sExt) > 0) sExt = sPos;                           // still travelling the same way: extend the stroke
+  else if (Math.abs(sPos - sExt) > 600) {                              // turned back: the stroke ended at the extreme
+    if (!sFirst) sLens.push(Math.abs(sExt - sStart)); sFirst = false;
+    sStart = sExt; sDir = -sDir; sExt = sPos;
+    $("hud").textContent = `stroke ${sLens.length} of 40 · last ${sLens.length ? sLens[sLens.length - 1].toFixed(0) : "-"} counts`;
+    if (sLens.length >= 40 && running) setTimeout(finishStops, 0);
+  }
+}
+
+function circleLive() {                           // live revolutions and drift while circles are drawn
+  cN++; cSx += cursor.x; cSy += cursor.y;
+  if (!cFirst) cFirst = { x: cursor.x, y: cursor.y };
+  const mx = cSx / cN, my = cSy / cN, a = Math.atan2(cursor.y - my, cursor.x - mx);
+  if (cPrev !== null && cN > 30) { let d = a - cPrev; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; if (Math.hypot(cursor.x - mx, cursor.y - my) > 25) cAng += Math.abs(d); }
+  cPrev = a;
+  const revs = cAng / (2 * Math.PI), drift = Math.hypot(cursor.x - cFirst.x, cursor.y - cFirst.y);
+  if (revs >= 20 && running) { setTimeout(finishCircles, 0); }
+  const edge = cursor.x < 40 || cursor.y < 100 || cursor.x > W - 40 || cursor.y > H - 40;
+  const secs = (performance.now() - t0) / 1000;
+  $("hud").textContent = `circle ${revs.toFixed(1)} of 20 · ${secs.toFixed(0)} s · ${drift.toFixed(0)} px from the start${edge ? " · NEAR THE EDGE" : ""}`;
+  $("count").dataset.revs = revs.toFixed(1);
+}
+
+function onMove(e) {
+  if (!running) return;
+  const list = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+  for (const c of list) {
+    if (raw) {
+      cursor.x = Math.min(W - 1, Math.max(0, cursor.x + c.movementX * gain));
+      cursor.y = Math.min(H - 1, Math.max(0, cursor.y + c.movementY * gain));
+      record(cursor.x, cursor.y, c.timeStamp, c.movementX, c.movementY);
+      if (stopsMode) stopsStep(c.movementX);
+    } else {
+      cursor.x = c.clientX; cursor.y = c.clientY;
+      record(c.clientX, c.clientY, c.timeStamp, c.movementX, c.movementY);
+    }
+    if (circles) circleLive();
+  }
+  draw();
+}
+addEventListener("pointermove", onMove);
+
+function onDown(e) {
+  if (!running || !target) return;
+  const cx = raw ? cursor.x : e.clientX, cy = raw ? cursor.y : e.clientY;
+  const d = Math.hypot(cx - target.x, cy - target.y);
+  if (d > R) { misses++; return; }
+  const now = e.timeStamp - t0;
+  trials.push({ i: idx, target: target, start: trialStart, click: { x: cx, y: cy, t: now }, miss: misses, evFrom: trialStart.ev, evTo: events.length });
+  misses = 0; idx++;
+  if (idx >= dots.length) return finish();
+  target = dots[idx]; trialStart = { x: cx, y: cy, t: now, ev: events.length };
+  $("hud").textContent = `dot ${idx + 1} / ${dots.length}`; draw();
+}
+addEventListener("pointerdown", onDown);
+
+let stopsMode = false, sPos = 0, sExt = 0, sDir = 0, sStart = 0, sLens = [], sFirst = true;
+let circles = false, circleEnd = 0, cN = 0, cSx = 0, cSy = 0, cAng = 0, cPrev = null, cFirst = null;
+$("start").onclick = async () => {
+  raw = $("raw").checked; gain = +$("gain").value || .5;
+  stopsMode = $("mode").value === "stops"; if (stopsMode) $("raw").checked = true; raw = $("raw").checked; sPos = 0; sExt = 0; sDir = 0; sStart = 0; sLens = []; sFirst = true;
+  circles = $("mode").value === "circles"; cN = 0; cSx = 0; cSy = 0; cAng = 0; cPrev = null; cFirst = null;
+  dots = makeDots(+$("count").value || 30); idx = 0; events = []; trials = []; misses = 0;
+  $("panel").classList.add("hide");
+  if (raw) {
+    try { await cv.requestPointerLock({ unadjustedMovement: true }); }
+    catch (e) { try { await cv.requestPointerLock(); $("hud").textContent = "raw movement not available: acceleration may still apply"; } catch (e2) { $("hud").textContent = "pointer lock refused"; return; } }
+    cursor = { x: W / 2, y: H / 2 };
+  } else cursor = { x: W / 2, y: H / 2 };
+  t0 = performance.now(); target = circles ? null : dots[0]; trialStart = { x: cursor.x, y: cursor.y, t: 0, ev: 0 };
+  if (stopsMode) $("hud").textContent = "slide between the two stops: the run ends after 40 strokes";
+  if (circles) { circleEnd = t0 + 180000; /* safety limit: the run normally ends at 20 revolutions */ $("hud").textContent = "draw steady circles on the desk, do not reposition the pointer"; const tick = () => { if (!running) return; const left = circleEnd - performance.now(); if (left <= 0) return finishCircles(); if (!cN) $("hud").textContent = "start drawing circles: the run stops by itself at 20"; setTimeout(tick, 250); }; tick(); }
+  running = true; $("stop").disabled = false; if (!circles) $("hud").textContent = `dot 1 / ${dots.length}`; draw();
+};
+
+function stats(a) { const s = [...a].sort((x, y) => x - y), n = s.length; return n ? { mean: a.reduce((p, c) => p + c, 0) / n, med: s[Math.floor(n / 2)], p95: s[Math.min(n - 1, Math.floor(n * .95))], max: s[n - 1] } : { mean: 0, med: 0, p95: 0, max: 0 }; }
+
+function analyse() {
+  const per = trials.map((t) => {
+    const ev = events.slice(t.evFrom, t.evTo), s = t.start, g = t.target;
+    const D = Math.hypot(g.x - s.x, g.y - s.y) || 1, ux = (g.x - s.x) / D, uy = (g.y - s.y) / D;
+    let L = 0, over = 0, maxStep = 0, gaps = 0, maxGap = 0, peaks = 0, prev = { x: s.x, y: s.y, t: s.t }, prevSpeed = 0, rising = false;
+    for (const e of ev) {
+      const dd = Math.hypot(e[1] - prev.x, e[2] - prev.y), dt = e[0] - prev.t; L += dd; maxStep = Math.max(maxStep, dd);
+      if (dt > 0 && dd > 0) { if (dt > 20) gaps++; maxGap = Math.max(maxGap, dt); const v = dd / dt; if (v > prevSpeed * 1.6 + 0.05 && !rising) { peaks++; rising = true; } if (v < prevSpeed) rising = false; prevSpeed = v; }
+      over = Math.max(over, (e[1] - s.x) * ux + (e[2] - s.y) * uy - D);
+      prev = { x: e[1], y: e[2], t: e[0] };
+    }
+    return { time: t.click.t - s.t, err: Math.hypot(t.click.x - g.x, t.click.y - g.y), eff: Math.min(1, D / (L || D)), over: Math.max(0, over), maxStep, gaps, maxGap, sub: peaks, miss: t.miss, dist: D };
+  });
+  const col = (k) => stats(per.map((p) => p[k]));
+  const stepAll = [], gapAll = []; let moving = 0;
+  for (let i = 1; i < events.length; i++) { const dt = events[i][0] - events[i - 1][0], dd = Math.hypot(events[i][1] - events[i - 1][1], events[i][2] - events[i - 1][2]); if (dd > 0 && dt < 200) { stepAll.push(dd); gapAll.push(dt); moving += dt; } }
+  return { per, sum: { time: col("time"), err: col("err"), eff: col("eff"), over: col("over"), sub: col("sub"), misses: trials.reduce((p, t) => p + t.miss, 0), step: stats(stepAll), gap: stats(gapAll), rate: moving ? stepAll.length / (moving / 1000) : 0, gapsOver20: gapAll.filter((x) => x > 20).length, events: events.length } };
+}
+
+function abort(msg) {                              // stop and discard the current run (nothing is saved)
+  if (!running) return;
+  running = false; target = null; events = []; trials = [];
+  if (document.pointerLockElement) document.exitPointerLock();
+  $("stop").disabled = true; $("hud").textContent = msg || "stopped, nothing saved. Press Start to record again."; draw();
+}
+$("stop").onclick = () => abort();
+addEventListener("keydown", (e) => { if (e.key === "Escape") abort(); });
+document.addEventListener("pointerlockchange", () => { if (raw && running && !document.pointerLockElement) abort("pointer lock ended, run discarded. Press Start to record again."); });
+
+async function finishStops() {
+  if (!running) return;
+  running = false; $("stop").disabled = true;
+  if (document.pointerLockElement) document.exitPointerLock();
+  const L = sLens, st = stats(L), mean = st.mean, sd = Math.sqrt(L.reduce((p, c) => p + (c - mean) ** 2, 0) / (L.length || 1));
+  const res = { strokes: L.length, lens: L, mean, sd, cv: mean ? sd / mean : 0, min: Math.min(...L), max: Math.max(...L), net: sPos, events: events.length };
+  const run = { label: $("label").value, mode: "stops", raw: true, when: new Date().toISOString(), screen: [W, H], events, summary: res };
+  let saved = "not saved (server not reachable)";
+  try { const r = await fetch("/save", { method: "POST", body: JSON.stringify(run) }); saved = "saved as " + (await r.json()).saved; } catch (e) {}
+  $("hud").textContent = "finished";
+  $("panel").innerHTML = `<h2 style="margin:0">Stops · ${$("label").selectedOptions[0].text}</h2><p class="muted">${saved}.</p>
+    <table><tr><th>Strokes recorded</th><td>${L.length}</td></tr>
+    <tr><th>Stroke length, mean (counts)</th><td>${mean.toFixed(0)}</td></tr>
+    <tr><th>Spread: standard deviation (counts, % of mean)</th><td>${sd.toFixed(0)} (${(100 * res.cv).toFixed(1)}%)</td></tr>
+    <tr><th>Shortest / longest stroke</th><td>${res.min.toFixed(0)} / ${res.max.toFixed(0)}</td></tr>
+    <tr><th>Net position after all strokes (counts)</th><td>${sPos.toFixed(0)}</td></tr></table>
+    <p class="muted">Strokes: ${L.map((x) => x.toFixed(0)).join(", ")}</p>`;
+  $("panel").classList.remove("hide"); draw();
+}
+
+async function finishCircles() {
+  if (!running) return;
+  running = false; $("stop").disabled = true;
+  if (document.pointerLockElement) document.exitPointerLock();
+  const n = events.length; if (n < 20) { $("hud").textContent = "too little movement"; return; }
+  // net displacement of the pointer, and in raw mode the sum of the raw counts (should be near zero for closed loops)
+  const first = events[0], lastE = events[n - 1];
+  let sumDx = 0, sumDy = 0, path = 0, ang = 0, cx = 0, cy = 0;
+  for (const e of events) { cx += e[1]; cy += e[2]; sumDx += e[3] || 0; sumDy += e[4] || 0; }
+  cx /= n; cy /= n;
+  let prevA = Math.atan2(first[2] - cy, first[1] - cx);
+  for (let i = 1; i < n; i++) { path += Math.hypot(events[i][1] - events[i - 1][1], events[i][2] - events[i - 1][2]); const a = Math.atan2(events[i][2] - cy, events[i][1] - cx); let d = a - prevA; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; ang += d; prevA = a; }
+  const revs = cAng / (2 * Math.PI), net = Math.hypot(lastE[1] - first[1], lastE[2] - first[2]);
+  const gaps = []; for (let i = 1; i < n; i++) { const dt = events[i][0] - events[i - 1][0]; if (dt < 200) gaps.push(dt); }
+  const gs = stats(gaps), slow = gaps.filter((x) => x > 19).length / (gaps.length || 1);
+  const res = { revs, net, perRev: net / (revs || 1), path, sumDx, sumDy, sumNet: Math.hypot(sumDx, sumDy), events: n, seconds: events[n - 1][0] / 1000, rate: n / (events[n - 1][0] / 1000), gap: gs, slowFrac: slow };
+  const run = { label: $("label").value, mode: "circles", raw, gain: raw ? gain : null, when: new Date().toISOString(), screen: [W, H], dpr: devicePixelRatio, events, summary: res };
+  let saved = "not saved (server not reachable)";
+  try { const r = await fetch("/save", { method: "POST", body: JSON.stringify(run) }); saved = "saved as " + (await r.json()).saved; } catch (e) {}
+  const f = (x, d = 1) => x.toFixed(d);
+  $("hud").textContent = "finished";
+  $("panel").innerHTML = `<h2 style="margin:0">Circles · ${$("label").selectedOptions[0].text}${raw ? " · raw mode" : " · normal acceleration"}</h2>
+    <p class="muted">${saved}.</p>
+    <table><tr><th>Revolutions drawn</th><td>${f(revs)}</td></tr>
+    <tr><th>Pointer ended this far from where it started (px)</th><td>${f(net)}</td></tr>
+    <tr><th>Drift per revolution (px)</th><td>${f(net / (revs || 1))}</td></tr>
+    <tr><th>Sum of all movement deltas, net (px or counts)</th><td>${f(res.sumNet)} (x ${f(sumDx, 0)}, y ${f(sumDy, 0)})</td></tr>
+    <tr><th>Move events per second</th><td>${f(res.rate, 0)}; median gap ${f(gs.med)} ms; gaps over 19 ms: ${f(slow * 100, 0)}%</td></tr></table>
+    <p class="muted">Press Start for the next run.</p>`;
+  $("panel").classList.remove("hide"); draw();
+}
+
+async function finish() {
+  running = false; target = null; $("stop").disabled = true;
+  if (document.pointerLockElement) document.exitPointerLock();
+  const res = analyse(), f = (x, n = 1) => x.toFixed(n);
+  const s = res.sum;
+  const run = { label: $("label").value, raw, gain: raw ? gain : null, when: new Date().toISOString(), screen: [W, H], dpr: devicePixelRatio, ua: navigator.userAgent, dots, trials, events, summary: s, per: res.per };
+  $("hud").textContent = "finished";
+  let saved = "not saved (server not reachable)";
+  try { const r = await fetch("/save", { method: "POST", body: JSON.stringify(run) }); saved = "saved as " + (await r.json()).saved; } catch (e) {}
+  const row = (n, a, u = "") => `<tr><td>${n}</td><td>${f(a.mean)}${u}</td><td>${f(a.med)}${u}</td><td>${f(a.p95)}${u}</td><td>${f(a.max)}${u}</td></tr>`;
+  $("panel").innerHTML = `<h2 style="margin:0">${$("label").selectedOptions[0].text}${raw ? " · raw mode" : " · normal acceleration"}</h2>
+    <p class="muted">${saved}. Hits: ${trials.length}, misses: ${s.misses}, move events: ${s.events} (about ${f(s.rate, 0)} per second while moving).</p>
+    <table><tr><th></th><th>mean</th><th>median</th><th>95th</th><th>max</th></tr>
+    ${row("Time to hit (ms)", s.time)}${row("Landing error (px)", s.err)}${row("Path efficiency (1 = straight)", s.eff)}${row("Overshoot (px)", s.over)}${row("Corrections per dot", s.sub)}
+    ${row("Step between events (px)", s.step)}${row("Gap between events (ms)", s.gap)}</table>
+    <p class="muted">Gaps over 20 ms while moving: ${s.gapsOver20} of ${s.gap.max ? res.sum.events : 0} events. Press Start for the next run.</p>`;
+  $("panel").classList.remove("hide"); draw();
+}
+</script>
+</body>
+</html>

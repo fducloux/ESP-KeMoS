@@ -61,10 +61,12 @@ static bt_addr_le_t host_addr[NUM_HOSTS];
 static uint8_t mod_swap = 1;                 // computer 1 is a Mac by default
 static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2" };   // labels for the config page
 static int mouse_gap_saved = -1;
+static char why_log[96];                     // last bond removals with their reason, kept in flash (UART key W)
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
 {
     if (!strcmp(name, "swap")) return rd(cb_arg, &mod_swap, 1) < 0 ? -EIO : 0;
+    if (!strcmp(name, "why")) { int r = rd(cb_arg, why_log, sizeof(why_log) - 1); why_log[r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
     if (name[0] == 'n' && name[1] >= '0' && name[1] <= '1' && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if ((name[0] != 's' && name[0] != 'h') || name[1] < '0' || name[1] > '1' || name[2]) return -ENOENT;
@@ -79,6 +81,21 @@ static void kvm_save(const char *key, const void *v, size_t n)
     snprintf(path, sizeof(path), "kvm/%s", key);
     settings_save_one(path, v, n);
 }
+// Every bond removal goes through here so a lost pairing can be traced after a power cycle.
+static int unpair_why(uint8_t id, const bt_addr_le_t *a, const char *why)
+{
+    char as[BT_ADDR_LE_STR_LEN] = "all";
+    if (a) bt_addr_le_to_str(a, as, sizeof(as));
+    LOG_WRN("UNPAIR identity %u %s: %s", id, as, why);
+    char evt[56], tmp[96];
+    snprintf(evt, sizeof(evt), "%us id%u %.17s %s", (unsigned)(k_uptime_get() / 1000), id, as, why);
+    snprintf(tmp, sizeof(tmp), "%s | %s", evt, why_log);
+    tmp[sizeof(why_log) - 1] = 0;
+    strcpy(why_log, tmp);
+    kvm_save("why", why_log, strlen(why_log));
+    return bt_unpair(id, a);
+}
+
 static void slot_save(int slot, const bt_addr_le_t *a)
 {
     char key[4] = { 's', '0' + slot, 0 };
@@ -134,7 +151,7 @@ static void forget_stale(void)
 {
     n_stale = 0;
     bt_foreach_bond(BT_ID_DEFAULT, stale_cb, NULL);
-    for (int i = 0; i < n_stale; i++) bt_unpair(BT_ID_DEFAULT, &stale[i]);
+    for (int i = 0; i < n_stale; i++) unpair_why(BT_ID_DEFAULT, &stale[i], "key C");
     LOG_INF("forgot %d stale bonds", n_stale);
 }
 
@@ -149,9 +166,9 @@ static void forget_computers(void)
 {
     n_stale = 0;
     bt_foreach_bond(BT_ID_DEFAULT, computer_bond_cb, NULL);
-    for (int i = 0; i < n_stale; i++) bt_unpair(BT_ID_DEFAULT, &stale[i]);
+    for (int i = 0; i < n_stale; i++) unpair_why(BT_ID_DEFAULT, &stale[i], "key U");
     LOG_INF("forgot %d computer bonds on identity 0", n_stale);
-    bt_unpair(1, NULL);
+    unpair_why(1, NULL, "key U");
 }
 
 static void auto_start(void)
@@ -209,7 +226,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct 
     bt_addr_le_to_str(addr, s, sizeof(s));
     if (bt_le_bond_exists(BT_ID_DEFAULT, addr)) {      // it advertises its name again: it wants a fresh pairing
         LOG_INF("dropping the old bond of %s", s);
-        bt_unpair(BT_ID_DEFAULT, addr);
+        unpair_why(BT_ID_DEFAULT, addr, "pairing scan: device advertises again");
     }
     LOG_INF("Connecting to %s \"%s\" (slot %d, rssi %d)", s, a.name, slot, rssi);
     bt_le_scan_stop();
@@ -426,14 +443,14 @@ static void host_pair_begin(int h)
 static bool same_addr(const bt_addr_le_t *a, const bt_addr_le_t *b) { return !memcmp(a->a.val, b->a.val, 6); }   // bytes only: macOS flips public/random
 static bool host_known(int h) { static const uint8_t z[6]; return memcmp(host_addr[h].a.val, z, 6) != 0; }
 
-static void forget_bond_both(const bt_addr_le_t *a) { bt_unpair(0, a); bt_unpair(1, a); }
+static void forget_bond_both(const bt_addr_le_t *a, const char *why) { unpair_why(0, a, why); unpair_why(1, a, why); }
 
 static void refuse_host(struct bt_conn *c, const char *why)
 {
     LOG_WRN("computer refused (%s)", why);
     bt_addr_le_t a = *bt_conn_get_dst(c);
     bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-    forget_bond_both(&a);
+    forget_bond_both(&a, why);
 }
 
 static void host_assigned(int h)
@@ -454,7 +471,7 @@ static void identify_host(struct bt_conn *c, bool fresh)
     if (!fresh && (host_pair < 0 || !(bt_le_bond_exists(0, a) || bt_le_bond_exists(1, a)))) return;
     if (host_pair < 0) { refuse_host(c, "unknown computer; type 1 or 2 on the UART first"); return; }
     int h = host_pair;
-    if (host_known(h) && !same_addr(&host_addr[h], a)) forget_bond_both(&host_addr[h]);     // replaced by a new computer
+    if (host_known(h) && !same_addr(&host_addr[h], a)) forget_bond_both(&host_addr[h], "computer replaced");     // replaced by a new computer
     host_addr[h] = *a;
     char key[3] = { 'h', '0' + h, 0 };
     kvm_save(key, a, sizeof(*a));
@@ -541,7 +558,7 @@ static void on_security(struct bt_conn *c, bt_security_t level, enum bt_security
     if (err) {
         const bt_addr_le_t *pa = bt_conn_get_dst(c);       // the keyboard no longer knows our key: forget it, pair fresh next time
         LOG_WRN("security failed, dropping the bond");
-        bt_unpair(BT_ID_DEFAULT, pa);
+        unpair_why(BT_ID_DEFAULT, pa, "security failed");
         bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         return;
     }
@@ -615,7 +632,7 @@ static void forget_host(int h)
     char key[3] = { 'h', '0' + h, 0 };
     kvm_save(key, &host_addr[h], sizeof(host_addr[h]));
     if (c) bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-    forget_bond_both(&old);
+    forget_bond_both(&old, "config page forget");
     LOG_INF("computer %d forgotten", h + 1);
 }
 
@@ -634,6 +651,9 @@ void cfg_command(const char *cmd)
         if (b) mod_swap |= 1 << h; else mod_swap &= ~(1 << h);
         kvm_save("swap", &mod_swap, 1);
         send_keys();
+    } else if (!strcmp(word, "stroke")) {            // "stroke <per> <n> <ms> <reps>" (diagnosis)
+        int per = 0, n = 0, ms = 0, reps = 0;
+        if (sscanf(cmd, "%*s %d %d %d %d", &per, &n, &ms, &reps) == 4) hid_dev_stroke(per, n, ms, reps);
     } else if (!strcmp(word, "gap")) {
         hid_dev_set_mouse_gap(a);
         int g = hid_dev_get_mouse_gap();
@@ -649,6 +669,18 @@ void cfg_command(const char *cmd)
         char key[3] = { 'n', '0' + h, 0 };
         kvm_save(key, host_name[h], strlen(host_name[h]));
     } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
+}
+
+// The mouse link and the active computer's link both run at 7.5 ms. Depending on how their events line up on the one
+// radio, the mouse's reports arrive evenly or in lumps. When they come in lumps, re-set the mouse link to the other of
+// two close intervals: the controller then picks a new alignment, and this repeats until the stream is even.
+static void mouse_reroll(void)
+{
+    static uint8_t ivl = 6;
+    if (!in[1].conn || !in[1].ready) return;
+    ivl = ivl == 6 ? 7 : 6;                                  // 7.5 ms <-> 8.75 ms
+    struct bt_le_conn_param p = BT_LE_CONN_PARAM_INIT(ivl, ivl, 0, 400);
+    LOG_INF("mouse link: lumpy arrivals, re-setting to %u.%02u ms (rc %d)", ivl * 5 / 4, (ivl * 125) % 100, bt_conn_le_param_update(in[1].conn, &p));
 }
 
 // diagnosis: every link's timing, to catch what degrades the radio schedule
@@ -707,6 +739,7 @@ int main(void)
     settings_load();
     // bonds are kept now
     hid_dev_init();
+    hid_dev_set_reroll(mouse_reroll);
     hid_dev_id_setup();
     if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);
     bt_conn_auth_cb_register(&auth_cbs);
@@ -730,16 +763,30 @@ int main(void)
             else if (c == 'N') links_dump("asked");
             else if (c == 'J') hid_dev_jiggle(6000);
             else if (c == 'R') { LOG_INF("rebooting"); k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
+            else if (c >= 'a' && c <= 'e') {          // test settings for the dot test: spacing and resampling
+                static const struct { int gap; bool rs; } t[] = { {8, false}, {0, false}, {4, false}, {7, false}, {7, true} };
+                hid_dev_set_mouse_gap(t[c - 'a'].gap); hid_dev_set_resample(t[c - 'a'].rs);
+                LOG_INF("test setting %c: spacing %d ms, resampling %s", c, t[c - 'a'].gap, t[c - 'a'].rs ? "on" : "off");
+            }
+            else if (c >= 'f' && c <= 'k') {          // test: set the mouse link interval (units of 1.25 ms): f 7.5, g 8.75, h 10, i 11.25, j 12.5, k 15 ms
+                static const uint8_t u[] = { 6, 7, 8, 9, 10, 12 };
+                if (in[1].conn) {
+                    struct bt_le_conn_param p = BT_LE_CONN_PARAM_INIT(u[c - 'f'], u[c - 'f'], 0, 400);
+                    LOG_INF("mouse link: asking %u.%02u ms (rc %d)", u[c - 'f'] * 5 / 4, (u[c - 'f'] * 125) % 100, bt_conn_le_param_update(in[1].conn, &p));
+                }
+            }
+            else if (c == 'Z') LOG_INF("mouse resampling %s", hid_dev_toggle_resample() ? "ON" : "off");
             else if (c == 'M') LOG_INF("mouse report spacing now %d ms", hid_dev_cycle_mouse_gap());
             else if (c == '3' || c == '4') switch_to(c - '3');
             else if (c == 'S') { mod_swap ^= 1 << active; kvm_save("swap", &mod_swap, 1); LOG_INF("computer %d Alt/Command swap %s", active + 1, (mod_swap >> active) & 1 ? "on" : "off"); send_keys(); }
-            else if (c == 'K') LOG_INF("active %d | connected: %d %d | known: %d %d | swap %02x | keyboard %d mouse %d", active + 1, hid_dev_connected(0), hid_dev_connected(1), host_known(0), host_known(1), mod_swap, in[0].ready, in[1].ready);
+            else if (c == 'K') { hid_dev_print_totals(); LOG_INF("active %d | connected: %d %d | known: %d %d | swap %02x | keyboard %d mouse %d", active + 1, hid_dev_connected(0), hid_dev_connected(1), host_known(0), host_known(1), mod_swap, in[0].ready, in[1].ready); }
             else if (c == 'C') forget_stale();
             else if (c == 'L') { LOG_INF("bonds id 0:"); bt_foreach_bond(0, bond_cb, NULL); LOG_INF("bonds id 1:"); bt_foreach_bond(1, bond_cb, NULL); }
             else if (c == 'U') forget_computers();
             else if (c == 'D') { host_dbg = !host_dbg; LOG_INF("report log %d", host_dbg); }
             else if (c == 'T') { blue_start(); k_work_schedule(&blue_test_stop, K_SECONDS(6)); LOG_INF("blue LED test, 6 s"); }
-            else if (c == 'X') { bt_unpair(BT_ID_DEFAULT, NULL); bt_unpair(1, NULL); LOG_INF("all bonds forgotten"); }
+            else if (c == 'X') { unpair_why(BT_ID_DEFAULT, NULL, "key X"); unpair_why(1, NULL, "key X"); LOG_INF("all bonds forgotten"); }
+            else if (c == 'W') LOG_INF("bond removals (newest first): %s", why_log[0] ? why_log : "none recorded");
             else if (c == 'B') {
                 printk("rebooting into UF2 bootloader\n");
                 k_sleep(K_MSEC(50));

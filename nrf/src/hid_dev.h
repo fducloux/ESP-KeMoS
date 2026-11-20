@@ -32,8 +32,13 @@ int hid_dev_send_consumer(int host, uint16_t usage);
 // Mouse movement goes to the active computer. It is summed up and sent when the previous
 // notification has gone out, so nothing is lost and nothing waits on a timer.
 void hid_dev_set_active(int host);
+void hid_dev_set_resample(bool on);
+bool hid_dev_toggle_resample(void);                     // even-out mode for the pointer; returns the new state
 void hid_dev_set_mouse_gap(int ms);
 int hid_dev_get_mouse_gap(void);
+void hid_dev_stroke(int per, int n, int ms, int reps);   // diagnosis only
+void hid_dev_print_totals(void);                        // movement counted in and out since boot, for the stops test
+void hid_dev_set_reroll(void (*cb)(void));              // called when the mouse's reports arrive lumpy
 void hid_dev_jiggle(int ms);                            // diagnosis only
 int hid_dev_cycle_mouse_gap(void);                      // 0 -> 8 -> 15 -> 22 ms minimum between mouse reports; returns the new value
 void hid_dev_mouse_in(uint8_t buttons, int dx, int dy, int wheel, int pan);

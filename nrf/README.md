@@ -39,6 +39,10 @@ the UART console and the firmware reboots into the bootloader.
 | `N` | print every link's interval and latency |
 | `J` | diagnosis: jiggle the pointer by +-1 count for 6 s and report delivery timing |
 | `R` | reboot |
+| `W` | show the last bond removals and why (kept in flash) |
+| `Z` | toggle pointer resampling (off by default) |
+| `a`-`e` | pointer spacing test settings, `f`-`k` mouse link interval test |
+| `K` | also prints the movement totals in and out since boot |
 | `B` | reboot into the UF2 bootloader |
 
 ## Notes
@@ -54,3 +58,14 @@ state as JSON, `...0003` (write) takes one text command: `pair 1|2`, `pairmx`, `
 `swap 1|2 0|1`, `gap <ms>`, `forget 1|2`, `name 1|2 <text>`, `reboot`. Reads and writes need an
 encrypted link. A slow non-connectable advertisement stays on, so the page can find the hub even
 when both computers are connected.
+
+## Pointer feel and the dot test
+The hub forwards every movement exactly (the totals in and out match). What decides the feel on macOS is the timing of the
+reports, because macOS accelerates the pointer from it. Two things matter: the mouse link and the active computer's link
+both run at 7.5 ms, and when their radio events line up badly the mouse's reports reach the hub in lumps. The hub watches
+the arrival gaps and re-sets the mouse link (7.5 / 8.75 ms) when they are lumpy. A reconnect scan for a sleeping keyboard
+or mouse uses 10 ms every 100 ms for the same reason.
+
+`tools/dots/` is a measuring page: `python3 tools/dots/server.py <results_dir>` and open http://127.0.0.1:8766/. It has a dot
+click test, a circles test and a stops test, normal or raw (pointer lock, no acceleration), and saves every run as JSON.
+Compare the hub with the Unifying dongle and with direct Bluetooth using the same mouse and the same Mac tracking speed.

@@ -244,8 +244,14 @@ static int clamp8(int v) { return v > 127 ? 127 : v < -127 ? -127 : v; }
 
 static unsigned st_in, st_ok, st_fail, st_maxd, st_maxgap, st_stuck, st_maxdone, st_slowdone;
 static int64_t st_last_send;
-static int64_t tot_in_x, tot_in_y, tot_out_x, tot_out_y;     // running sums since boot (diagnosis: is movement conserved?)
+static int64_t tot_in_x, tot_in_y, tot_out_x, tot_out_y, abs_in_x, abs_in_y;     // running sums since boot (diagnosis: is movement conserved?)
 static int64_t st_t;
+static uint32_t last_in_us;
+static void (*reroll_cb)(void);                // asks main.c to re-set the mouse link when its arrivals are lumpy
+static unsigned win_gaps, win_slow, rerolls;
+static int64_t win_start, last_reroll;
+static unsigned in_gap_hist[7];            // gaps between mouse reports at the hub: <=4, <=9, <=14, <=19, <=29, <=49, >49 ms (only while moving)
+static volatile bool mouse_resample;       // spread each burst of movement over two steps so the steps stay even (UART key Z)
 static volatile int mouse_gap_ms = 8;     // minimum time between mouse reports (0 = as soon as the previous one is out); 8 ms felt best on the Mac
 static int64_t last_send_ms;
 static atomic_t inflight;                 // a mouse notification is queued and not yet sent over the air
@@ -265,14 +271,19 @@ static void mouse_flush(void)
     if (!c) return;
     k_mutex_lock(&send_lock, K_FOREVER);
     if (atomic_get(&inflight)) { k_mutex_unlock(&send_lock); return; }
-    if (mouse_gap_ms) {                                 // keep the reports evenly spaced
-        int64_t wait = last_send_ms + mouse_gap_ms - k_uptime_get();
+    int gap = mouse_gap_ms;
+    if (gap) {                                          // keep the reports evenly spaced
+        int64_t wait = last_send_ms + gap - k_uptime_get();
         if (wait > 0) { k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(wait)); k_mutex_unlock(&send_lock); return; }
     }
     unsigned key = irq_lock();
     int dx = clamp16(mac.dx), dy = clamp16(mac.dy), wh = clamp8(mac.wheel), pn = clamp8(mac.pan);
     uint8_t b = mac.buttons;
     irq_unlock(key);
+    if (mouse_resample) {                               // send half of what is pending (rounded up); the rest follows on the next step
+        dx = dx > 0 ? (dx + 1) / 2 : dx < 0 ? (dx - 1) / 2 : 0;
+        dy = dy > 0 ? (dy + 1) / 2 : dy < 0 ? (dy - 1) / 2 : 0;
+    }
     if (!dx && !dy && !wh && !pn && b == mac.sent_buttons) { k_mutex_unlock(&send_lock); return; }
     { unsigned m = MAX(abs(dx), abs(dy)); if (m > st_maxd) st_maxd = m;
       int64_t t = k_uptime_get(); if (st_last_send && t - st_last_send < 300 && (unsigned)(t - st_last_send) > st_maxgap) st_maxgap = t - st_last_send; st_last_send = t; }
@@ -295,20 +306,33 @@ static void mouse_tick_fn(struct k_work *w)
     int64_t now = k_uptime_get();
     if (atomic_get(&inflight) && now - inflight_since > 100) { atomic_clear(&inflight); st_stuck++; }   // lost completion
     mouse_flush();
+    if (now - win_start >= 1000) {              // lumpy arrivals from the mouse: new link alignment
+        // Short bursts of movement count too (dot clicking is stroke, pause, stroke): 25 gaps are enough, and the
+        // window must be bad twice in a row so one slow hand movement does not trigger it.
+        static int bad_windows;
+        bool bad = win_gaps >= 25 && win_slow * 100 > win_gaps * 15;
+        if (win_gaps >= 25) bad_windows = bad ? bad_windows + 1 : 0;
+        if (reroll_cb && bad_windows >= 2 && now - last_reroll > 5000) { last_reroll = now; rerolls++; bad_windows = 0; reroll_cb(); }
+        win_gaps = win_slow = 0; win_start = now;
+    }
     if (now - st_t >= 2000) {
         if (st_in) {
             struct bt_conn_info ci = {0};
             struct bt_conn *c = hid_dev_conn_for(active_host);
             if (c) bt_conn_get_info(c, &ci);
-            LOG_INF("mouse 2 s, computer %d (link %u.%02u ms lat %u): in %u, sent %u, failed %u | max step %u, max gap %u ms, stuck %u, completion max %u ms (%u over 20) | totals in %d,%d out %d,%d pending %d,%d", active_host + 1,
-                    ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency, st_in, st_ok, st_fail, st_maxd, st_maxgap, st_stuck, st_maxdone, st_slowdone, (int)tot_in_x, (int)tot_in_y, (int)tot_out_x, (int)tot_out_y, mac.dx, mac.dy);
+            LOG_INF("mouse 2 s, computer %d (link %u.%02u ms lat %u): in %u, sent %u, failed %u | max step %u, max gap %u ms, stuck %u, completion max %u ms (%u over 20) | totals in %d,%d out %d,%d pending %d,%d | input gaps ms <=4:%u <=9:%u <=14:%u <=19:%u <=29:%u <=49:%u >49:%u rerolls %u", active_host + 1,
+                    ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency, st_in, st_ok, st_fail, st_maxd, st_maxgap, st_stuck, st_maxdone, st_slowdone, (int)tot_in_x, (int)tot_in_y, (int)tot_out_x, (int)tot_out_y, mac.dx, mac.dy,
+                    in_gap_hist[0], in_gap_hist[1], in_gap_hist[2], in_gap_hist[3], in_gap_hist[4], in_gap_hist[5], in_gap_hist[6], rerolls);
         }
         if (st_slowdone >= 2) { static int64_t last_dump; if (now - last_dump > 10000) { last_dump = now; links_dump("slow completions"); } }
+        memset(in_gap_hist, 0, sizeof(in_gap_hist));
         st_in = st_ok = st_fail = st_maxd = st_maxgap = st_stuck = st_maxdone = st_slowdone = 0; st_t = now;
     }
     k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(MOUSE_TICK_MS));
 }
 
+void hid_dev_set_resample(bool on) { mouse_resample = on; }
+bool hid_dev_toggle_resample(void) { mouse_resample = !mouse_resample; return mouse_resample; }
 void hid_dev_set_mouse_gap(int ms) { mouse_gap_ms = ms < 0 ? 0 : ms > 40 ? 40 : ms; }
 int hid_dev_get_mouse_gap(void) { return mouse_gap_ms; }
 
@@ -333,12 +357,46 @@ static void jiggle_fn(struct k_work *w)
 }
 void hid_dev_jiggle(int ms) { jiggle_left = ms / 10; k_work_reschedule_for_queue(&mouse_q, &jiggle_work, K_NO_WAIT); }
 
+// diagnosis: reps x (n reports of -per counts up, then n reports of +per counts down), one report every ms_gap ms
+static struct { int per, n, ms, reps, i, phase; } stroke;
+static void stroke_fn(struct k_work *w);
+static K_WORK_DELAYABLE_DEFINE(stroke_work, stroke_fn);
+static void stroke_fn(struct k_work *w)
+{
+    if (stroke.reps <= 0) return;
+    int dir = (stroke.phase & 1) ? 1 : -1;
+    hid_dev_mouse_in(0, 0, dir * stroke.per, 0, 0);
+    if (++stroke.i >= stroke.n) {
+        stroke.i = 0;
+        stroke.phase++;
+        if (stroke.phase >= 2) { stroke.phase = 0; stroke.reps--; }
+        k_work_reschedule_for_queue(&mouse_q, &stroke_work, K_MSEC(150));   // pause between strokes
+        return;
+    }
+    k_work_reschedule_for_queue(&mouse_q, &stroke_work, K_MSEC(stroke.ms));
+}
+void hid_dev_stroke(int per, int n, int ms, int reps)
+{
+    stroke.per = per; stroke.n = n; stroke.ms = ms; stroke.reps = reps; stroke.i = 0; stroke.phase = 0;
+    k_work_reschedule_for_queue(&mouse_q, &stroke_work, K_NO_WAIT);
+}
+
+void hid_dev_print_totals(void)
+{
+    LOG_INF("TOTALS in %d,%d out %d,%d pending %d,%d | path in %d,%d", (int)tot_in_x, (int)tot_in_y, (int)tot_out_x, (int)tot_out_y, mac.dx, mac.dy, (int)abs_in_x, (int)abs_in_y);
+}
+
+void hid_dev_set_reroll(void (*cb)(void)) { reroll_cb = cb; }
+
 void hid_dev_mouse_in(uint8_t buttons, int dx, int dy, int wheel, int pan)
 {
     st_in++;
+    { uint32_t now = k_cyc_to_us_floor32(k_cycle_get_32()), gap = (now - last_in_us) / 1000; last_in_us = now;
+      if (gap < 120) { win_gaps++; if (gap >= 20) win_slow++; }
+      if (gap < 120) in_gap_hist[gap <= 4 ? 0 : gap <= 9 ? 1 : gap <= 14 ? 2 : gap <= 19 ? 3 : gap <= 29 ? 4 : gap <= 49 ? 5 : 6]++; }
     unsigned key = irq_lock();
     mac.dx += dx; mac.dy += dy; mac.wheel += wheel; mac.pan += pan;
-    tot_in_x += dx; tot_in_y += dy;
+    tot_in_x += dx; tot_in_y += dy; abs_in_x += abs(dx); abs_in_y += abs(dy);
     mac.buttons = buttons;
     irq_unlock(key);
     k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_NO_WAIT);   // the mouse thread sends; this thread never blocks on it
