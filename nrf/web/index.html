@@ -61,7 +61,10 @@ input[type=text] { width: 9em; }
   <p class="sub">Settings for your keyboard and mouse switch.</p>
 
   <div id="unsupported" class="card hidden">
-    This browser cannot talk to Bluetooth devices. Use Chrome or Edge (Safari does not support Web Bluetooth).
+    <b>This browser cannot talk to Bluetooth devices.</b>
+    <div class="hint" style="margin-top:6px"><b>iPhone or iPad:</b> every browser there (Safari and Chrome too) lacks Web Bluetooth.
+      Install the free <a href="https://apps.apple.com/us/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noopener">Bluefy browser</a>
+      and open this page in it.<br><b>Android, Windows, Mac:</b> use Chrome or Edge.</div>
   </div>
 
   <div class="card" id="connectCard">
@@ -86,6 +89,7 @@ input[type=text] { width: 9em; }
   <div id="panel" class="hidden">
     <h2>Computers</h2>
     <div id="hosts"></div>
+    <div class="actions" id="addRow"><button id="addHost">Add computer</button></div>
 
     <h2>Keyboard and mouse</h2>
     <div class="card">
@@ -126,7 +130,8 @@ const CH_STATE = "5a6f0002-6b76-4d48-8f2e-7d9c1b2a3c4d";
 const CH_CMD = "5a6f0003-6b76-4d48-8f2e-7d9c1b2a3c4d";
 const $ = (id) => document.getElementById(id);
 let device = null, server = null, chState = null, chCmd = null, timer = null, state = null, busy = false;
-const pairUntil = [0, 0];            // when each computer's pairing window ends (ms)
+let extraHosts = 2;                  // computer cards shown (the Add computer button raises it up to four)
+const pairUntil = [0, 0, 0, 0];            // when each computer's pairing window ends (ms)
 let pairMxUntil = 0;
 
 if (!navigator.bluetooth) { $("unsupported").classList.remove("hidden"); $("connectBtn").disabled = true; }
@@ -190,9 +195,10 @@ function render() {
   $("learnSw").disabled = $("learnNs").disabled = !!state.learn;
   const now = Date.now();
   if (state.pair) pairUntil[state.pair - 1] = pairUntil[state.pair - 1] > now ? pairUntil[state.pair - 1] : now + 120000;
-  else pairUntil[0] = pairUntil[1] = 0;
+  else pairUntil.fill(0);
   if (state.pairmx) pairMxUntil = pairMxUntil > now ? pairMxUntil : now + 60000; else pairMxUntil = 0;
   $("pairMx").disabled = !!state.pairmx;
+  $("addHost").onclick = () => { extraHosts = Math.min(state.h.length, extraHosts + 1); render(); };
   $("pairMx").textContent = state.pairmx ? "Pairing… (" + Math.max(0, Math.round((pairMxUntil - now) / 1000)) + " s)" : "Pair keyboard or mouse…";
 
   const box = $("hosts");
@@ -200,19 +206,23 @@ function render() {
     state.h.forEach((_, i) => {
       const c = document.createElement("div");
       c.className = "card"; c.id = "host" + i;
-      c.style.setProperty("--hc", i === 0 ? "var(--led1)" : "var(--led2)");        // the hub's lights: red = computer 1, blue = computer 2
+      c.style.setProperty("--hc", i === 0 ? "var(--led1)" : i === 1 ? "var(--led2)" : "#9b59d0");   // the hub's lights: red = 1, blue = 2, both = 3 (and 4, blinking)
       c.innerHTML =
-        '<div class="row"><div class="grow"><span class="led"></span><span class="name"></span> <span class="badge hidden">in use</span></div><span class="chip"></span></div>' +
+        '<div class="row"><div class="grow"><span class="led"></span><span class="name"></span> <span class="badge hidden">in use</span> <span class="pos"></span></div><span class="chip"></span></div>' +
         '<div class="row" style="margin-top:10px"><label class="sw"><input type="checkbox" class="swap"> Swap Alt and Command (for a Mac)</label></div>' +
         '<div class="row" style="margin-top:6px"><label class="sw"><input type="checkbox" class="nos"> Keep awake (no-sleep)</label></div>' +
         '<div class="actions">' +
         '<button class="use primary">Use this computer</button>' +
+        '<button class="mvl" title="Move left in the order">&#9664; Left</button>' +
+        '<button class="mvr" title="Move right in the order">Right &#9654;</button>' +
         '<button class="pair">Pair…</button>' +
         '<button class="rename">Rename</button>' +
         '<button class="forget danger">Forget</button></div>' +
         '<div class="hint pairhint hidden"></div>';
       box.appendChild(c);
       c.querySelector(".use").onclick = () => send("switch " + (i + 1));
+      c.querySelector(".mvl").onclick = () => send("move " + (i + 1) + " -1");
+      c.querySelector(".mvr").onclick = () => send("move " + (i + 1) + " 1");
       c.querySelector(".pair").onclick = () => { pairUntil[i] = Date.now() + 120000; send("pair " + (i + 1)); };
       c.querySelector(".swap").onchange = (e) => send("swap " + (i + 1) + " " + (e.target.checked ? 1 : 0));
       c.querySelector(".nos").onchange = (e) => send("nosleep " + (i + 1) + " " + (e.target.checked ? 1 : 0));
@@ -225,8 +235,19 @@ function render() {
       };
     });
   }
+  let shown = Math.max(2, extraHosts);
+  state.h.forEach((h, i) => { if (h.known || h.on) shown = Math.max(shown, i + 1); });
+  extraHosts = shown;
+  $("addRow").classList.toggle("hidden", shown >= state.h.length);
+  const place = ["left-most", "middle 1", "middle 2", "right-most"];
   state.h.forEach((h, i) => {
     const c = $("host" + i), isActive = state.active === i;
+    c.classList.toggle("hidden", i >= shown);
+    c.querySelector(".pos").textContent = "· " + (i === 0 ? place[0] : i === shown - 1 ? place[3] : shown === 3 ? "middle" : place[i]);
+    c.querySelector(".mvl").disabled = i === 0;
+    c.querySelector(".mvr").disabled = i >= shown - 1;
+    c.querySelector(".mvl").classList.toggle("hidden", shown < 2);
+    c.querySelector(".mvr").classList.toggle("hidden", shown < 2);
     c.classList.toggle("active", isActive);
     c.querySelector(".name").textContent = h.n;
     c.querySelector(".badge").classList.toggle("hidden", !isActive);

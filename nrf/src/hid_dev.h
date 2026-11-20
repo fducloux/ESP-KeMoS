@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <zephyr/bluetooth/conn.h>
 
-#define NUM_HOSTS 2
+#define NUM_HOSTS 4          // computers, in order from the left-most (0) to the right-most (3)
 
 void hid_dev_init(void);
 // make sure the computer-facing identity exists (call after settings_load)
@@ -21,6 +21,7 @@ void hid_dev_conn_open(struct bt_conn *c);
 void hid_dev_conn_close(struct bt_conn *c);
 bool hid_dev_is_host_conn(const struct bt_conn *c);
 int  hid_dev_host_of(const struct bt_conn *c);          // 0..NUM_HOSTS-1, or -1 while pending
+void hid_dev_swap_hosts(int a, int b);                  // computers a and b trade places (live links follow)
 void hid_dev_assign(struct bt_conn *c, int host);       // c is computer `host`; an older link of it is dropped
 bool hid_dev_connected(int host);
 void hid_dev_mark_config(struct bt_conn *c);           // this link uses the config service (a phone): keep it

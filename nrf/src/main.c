@@ -61,7 +61,7 @@ static bool connecting;
 static bt_addr_le_t slot_addr[NUM_INPUTS];
 static bt_addr_le_t host_addr[NUM_HOSTS];
 static uint8_t mod_swap = 1;                 // computer 1 is a Mac by default
-static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2" };   // labels for the config page
+static char host_name[NUM_HOSTS][16] = { "Computer 1", "Computer 2", "Computer 3", "Computer 4" };   // labels for the config page
 static int mouse_gap_saved = -1;
 static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
 static uint8_t nosleep_bits;                 // bit per computer: a Left Shift tap every 30 s keeps it awake
@@ -74,8 +74,9 @@ static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_a
     if (!strcmp(name, "ns")) return rd(cb_arg, &nosleep_bits, 1) < 0 ? -EIO : 0;
     if (!strcmp(name, "why")) { int r = rd(cb_arg, why_log, sizeof(why_log) - 1); why_log[r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
-    if (name[0] == 'n' && name[1] >= '0' && name[1] <= '1' && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
-    if ((name[0] != 's' && name[0] != 'h') || name[1] < '0' || name[1] > '1' || name[2]) return -ENOENT;
+    if (name[0] == 'n' && name[1] >= '0' && name[1] < '0' + NUM_HOSTS && !name[2]) { int r = rd(cb_arg, host_name[name[1] - '0'], 15); host_name[name[1] - '0'][r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
+    if ((name[0] != 's' && name[0] != 'h') || name[1] < '0' || name[2]) return -ENOENT;
+    if (name[0] == 's' ? name[1] >= '0' + NUM_INPUTS : name[1] >= '0' + NUM_HOSTS) return -ENOENT;
     bt_addr_le_t *dst = name[0] == 's' ? &slot_addr[name[1] - '0'] : &host_addr[name[1] - '0'];
     return rd(cb_arg, dst, sizeof(bt_addr_le_t)) < 0 ? -EIO : 0;
 }
@@ -335,7 +336,22 @@ static void switch_to(int target)
     if (mouse_buttons) hid_dev_mouse_in(mouse_buttons, 0, 0, 0, 0);
 }
 
-// Hotkey: Ctrl+Shift+Left = computer 1, Ctrl+Shift+Right = computer 2. Returns true if the key is swallowed.
+static bool host_known(int h);
+
+// The computer one place to the left (dir -1) or right (dir +1) of the active one, or -1 to stay. Empty positions are
+// skipped. Past the end it wraps round, but only with three or more computers (with two, Left and Right just pick a side).
+static int step_target(int dir)
+{
+    int n = 0;
+    for (int h = 0; h < NUM_HOSTS; h++) if (host_known(h)) n++;
+    for (int h = active + dir; h >= 0 && h < NUM_HOSTS; h += dir) if (host_known(h)) return h;
+    if (n < 3) return -1;
+    for (int h = dir > 0 ? 0 : NUM_HOSTS - 1; h != active; h -= dir) if (host_known(h)) return h;
+    return -1;
+}
+
+// Hotkey: Ctrl+Shift+Left / Right = the computer to the left / right, Ctrl+Shift+1..4 = that position.
+// Returns true if the key is swallowed.
 static bool hotkey(int u)
 {
     if (is_modifier(u)) return false;
@@ -351,10 +367,13 @@ static bool hotkey(int u)
         return true;
     }
     seq_pos = 0;
-    int target = u == HK_LEFT ? 0 : u == HK_RIGHT ? 1 : -1;
-    if (target < 0) return false;
-    bm_set(suppressed, u);                // swallow the arrow *before* switching, so the new computer never sees it
-    switch_to(target);
+    int target = -1;
+    if (u == HK_LEFT) target = step_target(-1);
+    else if (u == HK_RIGHT) target = step_target(1);
+    else if (u >= 0x1E && u < 0x1E + NUM_HOSTS) target = host_known(u - 0x1E) ? u - 0x1E : -1;     // Ctrl+Shift+1..4: that position
+    else return false;
+    bm_set(suppressed, u);                // swallow the key *before* switching, so the new computer never sees it
+    if (target >= 0) switch_to(target);
     return true;
 }
 
@@ -411,7 +430,7 @@ static void mouse_click(uint8_t newly)
         return;
     }
     if (!ctrl_shift_down()) return;
-    if (sw_btn && ((newly >> (sw_btn - 1)) & 1)) { btn_suppress |= 1 << (sw_btn - 1); switch_to(1 - active); }
+    if (sw_btn && ((newly >> (sw_btn - 1)) & 1)) { btn_suppress |= 1 << (sw_btn - 1); { int t = step_target(1); if (t < 0) t = step_target(-1); if (t >= 0) switch_to(t); } }
     else if (ns_btn && ((newly >> (ns_btn - 1)) & 1)) { btn_suppress |= 1 << (ns_btn - 1); nosleep_set(active, !((nosleep_bits >> active) & 1)); }
 }
 
@@ -757,16 +776,41 @@ void nfc_tapped(void)
 
 int cfg_status(char *buf, size_t n)
 {
-    char n0[20], n1[20];
-    json_name(n0, sizeof(n0), host_name[0]);
-    json_name(n1, sizeof(n1), host_name[1]);
-    return snprintf(buf, n,
-        "{\"v\":2,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],"
-        "\"h\":[{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d},{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d}]}",
+    int o = snprintf(buf, n,
+        "{\"v\":3,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],\"h\":[",
         setup_open, setup_step, setup_step == ST_KBD ? gen_code : 0, hid_dev_config_connected(),
-        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode, sw_btn, ns_btn, learn_btn, nfc_field_count(), nfc_read_count(),
-        n0, host_known(0), hid_dev_connected(0), (mod_swap >> 0) & 1, (nosleep_bits >> 0) & 1,
-        n1, host_known(1), hid_dev_connected(1), (mod_swap >> 1) & 1, (nosleep_bits >> 1) & 1);
+        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode, sw_btn, ns_btn, learn_btn, nfc_field_count(), nfc_read_count());
+    for (int h = 0; h < NUM_HOSTS && o > 0 && o < (int)n; h++) {
+        char nm[20];
+        json_name(nm, sizeof(nm), host_name[h]);
+        o += snprintf(buf + o, n - o, "%s{\"n\":\"%s\",\"known\":%d,\"on\":%d,\"swap\":%d,\"nos\":%d}", h ? "," : "", nm,
+                      host_known(h), hid_dev_connected(h), (mod_swap >> h) & 1, (nosleep_bits >> h) & 1);
+    }
+    if (o > 0 && o < (int)n - 3) o += snprintf(buf + o, n - o, "]}");
+    return o;
+}
+
+// Computers a and a+dir trade places: addresses, names, Alt/Command swap and no-sleep go with the computer, and so do live links.
+static void move_host(int a, int dir)
+{
+    int b = a + dir;
+    if (a < 0 || a >= NUM_HOSTS || b < 0 || b >= NUM_HOSTS) return;
+    bt_addr_le_t ta = host_addr[a]; host_addr[a] = host_addr[b]; host_addr[b] = ta;
+    char tn[16]; memcpy(tn, host_name[a], 16); memcpy(host_name[a], host_name[b], 16); memcpy(host_name[b], tn, 16);
+    uint8_t ms = ((mod_swap >> a) & 1) | (((mod_swap >> b) & 1) << 1);              // bit 0 = old a, bit 1 = old b
+    mod_swap = (mod_swap & ~((1 << a) | (1 << b))) | (((ms >> 1) & 1) << a) | ((ms & 1) << b);
+    uint8_t ns = ((nosleep_bits >> a) & 1) | (((nosleep_bits >> b) & 1) << 1);
+    nosleep_bits = (nosleep_bits & ~((1 << a) | (1 << b))) | (((ns >> 1) & 1) << a) | ((ns & 1) << b);
+    if (active == a) active = b; else if (active == b) active = a;
+    hid_dev_swap_hosts(a, b);
+    for (int h = a < b ? a : b; h <= (a < b ? b : a); h++) {
+        char k1[3] = { 'h', '0' + h, 0 }, k2[3] = { 'n', '0' + h, 0 };
+        kvm_save(k1, &host_addr[h], sizeof(host_addr[h]));
+        kvm_save(k2, host_name[h], strlen(host_name[h]));
+    }
+    kvm_save("swap", &mod_swap, 1);
+    kvm_save("ns", &nosleep_bits, 1);
+    LOG_INF("computer %d moved %s (now position %d)", a + 1, dir < 0 ? "left" : "right", b + 1);
 }
 
 static void forget_host(int h)
@@ -821,7 +865,8 @@ void cfg_command(const char *cmd)
         strcpy(host_name[h], tmp);
         char key[3] = { 'n', '0' + h, 0 };
         kvm_save(key, host_name[h], strlen(host_name[h]));
-    } else if (!strcmp(word, "bootloader")) { k_sleep(K_MSEC(100)); nrf_power_gpregret_set(NRF_POWER, 0, 0x57); sys_reboot(SYS_REBOOT_COLD);
+    } else if (!strcmp(word, "move") && valid && (b == -1 || b == 1)) move_host(h, b);
+    else if (!strcmp(word, "bootloader")) { k_sleep(K_MSEC(100)); nrf_power_gpregret_set(NRF_POWER, 0, 0x57); sys_reboot(SYS_REBOOT_COLD);
     } else if (!strcmp(word, "reboot")) { k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
 }
 
@@ -900,8 +945,12 @@ static void ns_fn(struct k_work *w)
     // One LED per computer: red = computer 1, blue = computer 2. The selected computer's LED is on; with no-sleep on it
     // dips off for 100 ms every 2 s. An unselected computer's LED is off; with no-sleep on it flashes on for 100 ms every 2 s.
     // The two blink one second apart. Green is for pairing: it blinks while any pairing window is open.
-    bool ns0 = nosleep_bits & 1, ns1 = nosleep_bits & 2, p0 = (n % 20) == 0, p1 = (n % 20) == 10;
-    gpio_pin_set_dt(&led_r, active == 0 ? !(ns0 && p0) : (ns0 && p0));
+    // With more than two computers: 3 = red and blue together, 4 = red and blue together, blinking.
+    bool lr = active == 0 || active == 2 || (active == 3 && (n % 10) < 5);
+    bool lb = active == 1 || active == 2 || (active == 3 && (n % 10) < 5);
+    for (int h = 0; h < NUM_HOSTS; h++)
+        if (((nosleep_bits >> h) & 1) && (n % 20) == 5 * h) { if (h != 1) lr = !lr; if (h != 0) lb = !lb; }
+    gpio_pin_set_dt(&led_r, lr);
     // Green is for pairing: fast blink while a pairing window is open and the hub is scanning or waiting for the device,
     // slow blink while the device is connected and waiting for you (the code to type), off when pairing is complete.
     bool g = false;
@@ -910,7 +959,7 @@ static void ns_fn(struct k_work *w)
     else g = setup_open;                                   // steady green: the phone link is open
     gpio_pin_set_dt(&led, g);
     if (setup_open && setup_until && k_uptime_get() > setup_until) setup_end();
-    if (!blue_active) gpio_pin_set_dt(&led_b, active == 1 ? !(ns1 && p1) : (ns1 && p1));
+    if (!blue_active) gpio_pin_set_dt(&led_b, lb);
     k_work_reschedule(&ns_work, K_MSEC(100));
 }
 
@@ -946,7 +995,7 @@ int main(void)
     k_work_reschedule(&ns_work, K_MSEC(100));
     {   // a hub with nothing paired at all starts the setup wizard for the phone by itself
         static const uint8_t z[6];
-        bool fresh = !memcmp(slot_addr[0].a.val, z, 6) && !memcmp(slot_addr[1].a.val, z, 6) && !host_known(0) && !host_known(1);
+        bool fresh = !memcmp(slot_addr[0].a.val, z, 6) && !memcmp(slot_addr[1].a.val, z, 6) && !host_known(0) && !host_known(1) && !host_known(2) && !host_known(3);
         if (fresh) setup_begin(true, 30);
     }
     const struct device *con = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));

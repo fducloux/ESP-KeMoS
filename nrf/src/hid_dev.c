@@ -48,7 +48,7 @@ BT_HIDS_DEF(hids, 1, 8, 7, 2);       // report lengths: LED output, keyboard, mo
 #define MOUSE_TICK_MS 20            // watchdog and statistics only; sending is paced by completions
 
 // the links that are connected to us as a peripheral. host >= 0: computer 1 or 2; -1: connected but not identified yet; -2: a phone doing setup
-#define NUM_PERIPH (NUM_HOSTS + 1)                // two computers and a phone doing setup
+#define NUM_PERIPH (NUM_HOSTS + 1)                // the computers and a phone doing setup
 static struct { struct bt_conn *conn; int host; } hc[NUM_PERIPH];
 static int active_host;
 static int idle_tries[NUM_HOSTS];                // asks to relax an idle computer's link that macOS undid
@@ -140,6 +140,16 @@ void hid_dev_assign(struct bt_conn *c, int h)
         if (j != i && hc[j].conn && hc[j].host == h) bt_conn_disconnect(hc[j].conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     hc[i].host = h;
     k_work_reschedule(&link_work, K_SECONDS(3));
+}
+
+void hid_dev_swap_hosts(int a, int b)
+{
+    for (int i = 0; i < NUM_PERIPH; i++) {
+        if (!hc[i].conn) continue;
+        if (hc[i].host == a) hc[i].host = b; else if (hc[i].host == b) hc[i].host = a;
+    }
+    int t = idle_tries[a]; idle_tries[a] = idle_tries[b]; idle_tries[b] = t;
+    if (active_host == a) active_host = b; else if (active_host == b) active_host = a;
 }
 
 static const struct bt_data ad[] = {
