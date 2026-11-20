@@ -120,31 +120,38 @@ code { font: 13px ui-monospace, Menlo, monospace; background: var(--line); paddi
         <tr><td><span class="dot" style="background:var(--wire-sig)"></span>SS</td><td>D1</td><td>chip select</td></tr>
         <tr><td><span class="dot" style="background:var(--wire-sig)"></span>INT</td><td>D2</td><td>interrupt (active low)</td></tr>
         <tr><td><span class="dot" style="background:var(--wire-sig)"></span>RST</td><td>D3</td><td>reset (optional, recommended)</td></tr>
-        <tr><td><span class="dot" style="background:var(--wire-5v)"></span>VCC (USB power pad)</td><td>5V pin</td><td>5 V for the dongle, <strong>only after the cut below</strong></td></tr>
+        <tr><td><span class="dot" style="background:var(--wire-5v)"></span>VCC (USB power pad)</td><td>5V pin</td><td>5 V for the dongle, <strong>only after the two tests below</strong></td></tr>
       </tbody>
     </table>
     <p class="sub" style="margin-top:8px">D6 and D7 stay free for the console. GPX and the GPIN/GPOUT headers stay unconnected.</p>
   </section>
 
   <section class="warn">
-    <h2 style="color:var(--warn)">The cut: what I know and what I don't</h2>
-    <p><strong>What the seller says:</strong> cut the yellow-marked trace, then feed 5 V to the VCC pad. This separates the USB socket's power from the board's 3.3 V rail, so the chip stays at 3.3 V and the dongle gets 5 V.</p>
-    <p style="margin-top:8px"><strong>What I could not confirm:</strong> none of the listing photos I saw shows the yellow mark, so I can't point to the exact trace. It should be a thin trace or a solder-bridge near the VCC pad next to the USB socket (on the back of the board the pad is labelled VBUS). Find it on your board before cutting, and send me a close-up photo of that corner if you are unsure. It might also not be cuttable; the fallback is at the end.</p>
+    <h2 style="color:var(--warn)">The yellow line: I could not find it, and it may not be needed</h2>
+    <p>The seller says to cut a yellow-marked wire and then feed 5 V to the VCC pad. None of the listing photos shows a yellow mark. A manual for a similar mini board says the opposite: its USB power link is a solder jumper that ships <strong>open</strong>, and you close it. I can't tell which case your board is, so let a multimeter decide when it arrives. Nothing needs cutting until a test says so.</p>
+  </section>
+
+  <section class="card">
+    <h2>Two continuity tests (multimeter on the beep setting, board unpowered)</h2>
+    <ol>
+      <li><strong>VCC pad to the 3.3V pad.</strong> No beep: nothing ties them, so do not cut anything. Beep: they are tied together, and that link is the "yellow wire". Cut only that link, then test again: it must not beep.</li>
+      <li><strong>VCC pad to the four solder pins of the USB-A socket.</strong> One of them is VBUS. Beep on one pin: the pad feeds the socket, so 5 V on the VCC pad powers the dongle. No beep on any: the power link is an open solder jumper near the socket (labelled VBUS on the back); bridge it with a small blob of solder, then test again.</li>
+    </ol>
+    <p class="sub" style="margin-top:8px">If the results do not match either case, stop and send me a photo of both sides of the board with the meter readings. Do not guess.</p>
   </section>
 
   <section class="card">
     <h2>Before you power it</h2>
     <ol>
-      <li>Set a multimeter to continuity. Touch the VCC pad and the board's 3.3V pad. If they beep, the two are tied together: that is the trace to cut.</li>
-      <li>Cut only that trace (a hobby knife, two or three cuts). Check again: VCC and 3.3V must no longer beep.</li>
+      <li>Do the two tests above and make the change they call for, if any.</li>
       <li>Solder a wire from the XIAO's 5V pin to the VCC pad. Wire everything else from the table.</li>
-      <li>Power it from the Mac and measure with the board connected: the 3.3V pad reads about 3.3 V, the VCC pad about 5 V, and SCLK, MOSI, MISO, SS, INT and RST never read 5 V.</li>
+      <li>Power it from the Mac and measure: the 3.3V pad about 3.3 V, the VCC pad about 5 V, and SCLK, MOSI, MISO, SS, INT and RST never 5 V.</li>
     </ol>
-    <p class="sub" style="margin-top:10px">If anything reads 5 V on a signal pad, unplug it and send me the readings. Never connect the VCC pad to 3.3 V, and never feed 5 V into a board whose 3.3V pad is still tied to VCC.</p>
+    <p class="sub" style="margin-top:10px">If anything reads 5 V on a signal pad, unplug it and send me the readings. Never feed 5 V into the VCC pad while it is still tied to the 3.3V pad.</p>
   </section>
 
   <section class="card">
-    <h2>If the trace cannot be cut</h2>
-    <p>Do not feed 5 V into the VCC pad then. Instead, power the dongle through a separate USB-A breakout wired to the XIAO's 5V pin, or lift the USB socket's power leg. Tell me what you find and I will adapt the plan.</p>
+    <h2>If it can't be made to work</h2>
+    <p>Power the dongle through a separate USB-A breakout wired to the XIAO's 5V pin, or use a board with a documented 5 V input such as Adafruit's USB Host FeatherWing. Tell me what you find and I will adapt the plan.</p>
   </section>
 </main>
