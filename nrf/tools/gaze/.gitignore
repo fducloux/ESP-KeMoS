@@ -1,0 +1,5 @@
+face_landmarker.task
+tour*.json
+check*.json
+live_*.csv
+__pycache__/

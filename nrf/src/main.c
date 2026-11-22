@@ -66,8 +66,9 @@ static int mouse_gap_saved = -1;
 static struct { uint8_t gap[NUM_HOSTS]; uint8_t even; } mouse_saved;     // per computer: report spacing (ms) and "even out" bits
 static bool mouse_saved_ok;
 static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
+static volatile int64_t last_key_ms;       // uptime of the last keyboard report (the gaze prototype does not switch computers while you type)
 static uint8_t nosleep_bits;                 // bit per computer: a Left Shift tap every 30 s keeps it awake
-static char why_log[96];                     // last bond removals with their reason, kept in flash (UART key W)
+static char why_log[320];                     // last bond removals with their reason, kept in flash (UART key W)
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
 {
@@ -102,7 +103,7 @@ static int unpair_why(uint8_t id, const bt_addr_le_t *a, const char *why)
     char as[BT_ADDR_LE_STR_LEN] = "all";
     if (a) bt_addr_le_to_str(a, as, sizeof(as));
     LOG_WRN("UNPAIR identity %u %s: %s", id, as, why);
-    char evt[56], tmp[96];
+    char evt[64], tmp[sizeof(why_log)];
     snprintf(evt, sizeof(evt), "%us id%u %.17s %s", (unsigned)(k_uptime_get() / 1000), id, as, why);
     snprintf(tmp, sizeof(tmp), "%s | %s", evt, why_log);
     tmp[sizeof(why_log) - 1] = 0;
@@ -114,6 +115,12 @@ static int unpair_why(uint8_t id, const bt_addr_le_t *a, const char *why)
 static void slot_save(int slot, const bt_addr_le_t *a)
 {
     char key[4] = { 's', '0' + slot, 0 };
+    static const uint8_t zero[6];
+    if (memcmp(slot_addr[slot].a.val, zero, 6) && bt_addr_le_cmp(&slot_addr[slot], a)) {      // this slot was paired again: the old pairing is dead weight
+        bt_addr_le_t old = slot_addr[slot];
+        slot_addr[slot] = *a;
+        unpair_why(BT_ID_DEFAULT, &old, "replaced by a new pairing");
+    }
     slot_addr[slot] = *a;
     kvm_save(key, a, sizeof(*a));
 }
@@ -222,6 +229,7 @@ static void pairing_end_fn(struct k_work *w)
     if (!pairing_mode) return;
     pairing_mode = false;
     pair_slot = -1;
+    gen_code = 0;
     bt_le_scan_stop();
     LOG_INF("pairing mode over");
     auto_start();
@@ -230,6 +238,7 @@ static K_WORK_DELAYABLE_DEFINE(pairing_end_work, pairing_end_fn);
 
 static void pairing_begin(int slot)
 {
+    if (slot != 1) gen_code = 100000 + sys_rand32_get() % 900000;     // the keyboard (or either device) asks for a code: a fresh random one, shown on the page
     pairing_mode = true;
     pair_slot = slot;
     bt_conn_create_auto_stop();
@@ -453,6 +462,7 @@ static uint8_t report_cb(struct bt_hogp *h, struct bt_hogp_rep_info *rep, uint8_
         LOG_INF("report id %u len %u: %s", id, (unsigned)n, hex);
     }
     if (h == &in[0].hogp && id == 1 && n == 7) {         // MX Keys: modifiers + 6 keys
+        last_key_ms = k_uptime_get();
         memset(keys, 0, sizeof(keys));
         for (int i = 0; i < 8; i++) if (data[0] & (1 << i)) bm_set(keys, 0xE0 + i);
         for (int i = 1; i < 7; i++) if (data[i] >= 4) bm_set(keys, data[i]);
@@ -633,6 +643,13 @@ static void host_check_fn(struct k_work *w)
     struct bt_conn *c = hid_dev_pending();
     if (!c) return;
     if (host_pair >= 0) { k_work_reschedule((struct k_work_delayable *)w, K_SECONDS(10)); return; }
+    const bt_addr_le_t *a = bt_conn_get_dst(c);
+    for (int h = 0; h < NUM_HOSTS; h++)
+        if (host_known(h) && same_addr(&host_addr[h], a)) {          // a computer we know that did not encrypt in time: let it try again, keep its pairing
+            LOG_WRN("known computer %d did not encrypt in 30 s: disconnected, pairing kept", h + 1);
+            bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            return;
+        }
     refuse_host(c, "never identified itself");
 }
 static K_WORK_DELAYABLE_DEFINE(host_check_work, host_check_fn);
@@ -771,9 +788,13 @@ static void on_security(struct bt_conn *c, bt_security_t level, enum bt_security
     if (slot < 0) return;
     LOG_INF("slot %d security level %d err %d", slot, level, err);
     if (err) {
-        const bt_addr_le_t *pa = bt_conn_get_dst(c);       // the keyboard no longer knows our key: forget it, pair fresh next time
-        LOG_WRN("security failed, dropping the bond");
-        unpair_why(BT_ID_DEFAULT, pa, "security failed");
+        const bt_addr_le_t *pa = bt_conn_get_dst(c);
+        if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {         // the device really no longer knows our key: forget it, pair fresh next time
+            LOG_WRN("security failed (key missing), dropping the bond");
+            unpair_why(BT_ID_DEFAULT, pa, "peer lost its key");
+        } else {                                                // anything else (a link that broke half way, a glitch) is not a reason to lose a pairing
+            LOG_WRN("security failed (err %d): bond kept, will retry", err);
+        }
         bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         return;
     }
@@ -837,10 +858,13 @@ void nfc_tapped(void)
 
 int cfg_status(char *buf, size_t n)
 {
+    char why_json[sizeof(why_log)];                              // the last bond removals and their reasons, plain characters only
+    { size_t j = 0; for (const char *q = why_log; *q && j + 1 < sizeof(why_json); q++) why_json[j++] = (*q >= 0x20 && *q < 0x7f && *q != '"' && *q != '\\') ? *q : '_'; why_json[j] = 0; }
     int o = snprintf(buf, n,
-        "{\"v\":3,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],\"h\":[",
-        setup_open, setup_step, setup_step == ST_KBD ? gen_code : 0, hid_dev_config_connected(),
-        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode, sw_btn, ns_btn, learn_btn, nfc_field_count(), nfc_read_count());
+        "{\"v\":3,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],\"kidle\":%d,\"why\":\"%s\",\"h\":[",
+        setup_open, setup_step, (pairing_mode && pair_slot != 1) ? gen_code : 0, hid_dev_config_connected(),
+        active, hid_dev_get_mouse_gap(), in[0].ready, in[1].ready, host_pair + 1, pairing_mode, sw_btn, ns_btn, learn_btn, nfc_field_count(), nfc_read_count(),
+        last_key_ms ? (int)MIN(60000, k_uptime_get() - last_key_ms) : 60000, why_json);
     for (int h = 0; h < NUM_HOSTS && o > 0 && o < (int)n; h++) {
         char nm[20];
         json_name(nm, sizeof(nm), host_name[h]);
@@ -883,6 +907,13 @@ static void forget_host(int h)
     kvm_save(key, &host_addr[h], sizeof(host_addr[h]));
     if (c) bt_conn_disconnect(c, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     forget_bond_both(&old, "config page forget");
+    snprintf(host_name[h], sizeof(host_name[h]), "Computer %d", h + 1);       // the slot starts fresh: default label, Alt/Command swap and no-sleep off
+    char nk[3] = { 'n', '0' + h, 0 };
+    kvm_save(nk, host_name[h], strlen(host_name[h]));
+    mod_swap &= ~(1 << h); nosleep_bits &= ~(1 << h);
+    kvm_save("swap", &mod_swap, 1); kvm_save("ns", &nosleep_bits, 1);
+    for (int k = h; k < NUM_HOSTS - 1; k++)                                   // close the gap: later computers move up one place
+        if (!host_known(k) && host_known(k + 1)) move_host(k, k + 1);
     LOG_INF("computer %d forgotten", h + 1);
 }
 

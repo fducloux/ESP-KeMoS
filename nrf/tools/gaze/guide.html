@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gaze guide</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 28px/1.3 system-ui, sans-serif; overflow: hidden; cursor: none; }
+  #text { position: fixed; top: 6vh; left: 0; right: 0; text-align: center; padding: 0 8vw; }
+  #bar { position: fixed; top: 16vh; left: 30vw; width: 40vw; height: 8px; background: #222; border-radius: 4px; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #8bd; }
+  #nose { position: fixed; top: 50vh; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; background: #2ecc40; }
+  #eyes { position: fixed; top: 50vh; width: 72px; height: 72px; margin: -36px 0 0 -36px; border-radius: 50%; border: 8px solid #ff3b30; box-sizing: border-box; }
+  #half { position: fixed; top: 0; bottom: 0; width: 50vw; background: rgba(120,180,255,.10); display: none; }
+  #grid { position: fixed; inset: 0; display: none; }
+  .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #333; }
+  .tick span { position: absolute; bottom: 14vh; left: 4px; color: #777; font-size: 20px; white-space: nowrap; }
+  #estb { position: fixed; top: 50vh; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; background: #3a9dff; display: none; }
+  #esth { position: fixed; top: 50vh; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%; border: 5px solid #fff; box-sizing: border-box; display: none; }
+  #legend { position: fixed; bottom: 4vh; left: 0; right: 0; text-align: center; font-size: 20px; color: #999; }
+  #score { position: fixed; bottom: 10vh; left: 30vw; width: 40vw; height: 10px; background: #222; border-radius: 5px; display: none; }
+  #needle { position: absolute; top: -4px; width: 4px; height: 18px; background: #fff; margin-left: -2px; }
+  #mid { position: absolute; top: -4px; left: 50%; width: 2px; height: 18px; background: #555; }
+</style></head><body>
+<div id="half"></div><div id="grid"></div><div id="estb"></div><div id="esth"></div>
+<div id="text">Waiting for the program…</div>
+<div id="bar"><div id="fill"></div></div>
+<div id="nose"></div><div id="eyes"></div>
+<div id="score"><div id="mid"></div><div id="needle"></div></div>
+<div id="legend">Green dot: point your <b>nose</b> at it. Red ring: look at it with your <b>eyes</b>. Esc leaves full screen.</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let total = 1, last = 0;
+for (let p = 0; p <= 100; p += 10) { const t = document.createElement("div"); t.className = "tick"; t.style.left = p + "vw"; t.innerHTML = "<span>" + p + "%</span>"; $("grid").appendChild(t); }
+async function tick() {
+  try {
+    const s = await (await fetch("/state", { cache: "no-store" })).json();
+    $("text").textContent = s.text || "";
+    $("nose").style.left = (s.nose * 100) + "vw"; $("eyes").style.left = (s.eyes * 100) + "vw";
+    const dot = s.mode === "dot";
+    $("grid").style.display = dot ? "block" : "none";
+    $("estb").style.display = $("esth").style.display = dot ? "block" : "none";
+    if (dot) { $("estb").style.left = (s.est_both * 100) + "vw"; $("esth").style.left = (s.est_head * 100) + "vw"; }
+    const live = s.mode === "live";
+    $("nose").style.display = $("eyes").style.display = (live || dot) ? "none" : "block";
+    $("bar").style.display = (live || dot) ? "none" : "block";
+    $("score").style.display = live ? "block" : "none";
+    const half = $("half");
+    half.style.display = live && s.zone ? "block" : "none"; half.style.left = s.zone === "L" ? "0" : "50vw";
+    if (live) $("needle").style.left = ((0.5 - s.score / 2) * 100).toFixed(1) + "%";     // left side of the bar = looking left
+    const left = Math.max(0, s.until - Date.now() / 1000);
+    if (s.until !== last) { last = s.until; total = Math.max(0.1, left); }
+    $("fill").style.width = (100 * (1 - left / total)) + "%";
+    $("fill").style.background = s.mode === "record" ? "#2ecc40" : "#8bd";
+  } catch (e) { $("text").textContent = "No connection to the program (is it running?)"; }
+}
+setInterval(tick, 100);
+document.addEventListener("click", () => { if (!document.fullscreenElement) document.documentElement.requestFullscreen(); });
+</script></body></html>

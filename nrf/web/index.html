@@ -101,7 +101,7 @@ input[type=text] { width: 9em; }
       <div class="row"><span class="grow">MX Keys (keyboard)</span><span class="chip" id="kbd">-</span></div>
       <div class="row" style="margin-top:8px"><span class="grow">MX Master (mouse)</span><span class="chip" id="mouse">-</span></div>
       <div class="actions"><button id="pairMx">Pair keyboard or mouse…</button></div>
-      <div class="hint" id="pairMxHint">Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). The keyboard asks for the code 123456.</div>
+      <div class="hint" id="pairMxHint">Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). If the keyboard asks for a code, it shows here once pairing is open. The mouse needs no code.</div>
     </div>
 
     <h2>Shortcuts</h2>
@@ -121,7 +121,7 @@ const CH_STATE = "5a6f0002-6b76-4d48-8f2e-7d9c1b2a3c4d";
 const CH_CMD = "5a6f0003-6b76-4d48-8f2e-7d9c1b2a3c4d";
 const $ = (id) => document.getElementById(id);
 let device = null, server = null, chState = null, chCmd = null, timer = null, state = null, busy = false;
-let extraHosts = 2;                  // computer cards shown (the Add computer button raises it up to four)
+let adding = false, addBase = 0;      // the Add computer button shows one more, empty card until that computer is paired
 const pairUntil = [0, 0, 0, 0];            // when each computer's pairing window ends (ms)
 let pairMxUntil = 0;
 
@@ -226,7 +226,8 @@ function render() {
   else pairUntil.fill(0);
   if (state.pairmx) pairMxUntil = pairMxUntil > now ? pairMxUntil : now + 60000; else pairMxUntil = 0;
   $("pairMx").disabled = !!state.pairmx;
-  $("addHost").onclick = () => { extraHosts = Math.min(state.h.length, extraHosts + 1); render(); };
+  $("pairMxHint").innerHTML = state.pairmx && state.code ? 'Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). If the <b>keyboard</b> asks for a code, type this one and press Enter:<div class="bigcode" aria-label="code to type">' + String(state.code).padStart(6, "0") + '</div>The mouse needs no code.' : 'Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). If the keyboard asks for a code, it shows here once pairing is open. The mouse needs no code.';
+  $("addHost").onclick = () => { adding = true; addBase = state.h.filter((h) => h.known || h.on).length; render(); };
   $("pairMx").textContent = state.pairmx ? "Pairing… (" + Math.max(0, Math.round((pairMxUntil - now) / 1000)) + " s)" : "Pair keyboard or mouse…";
 
   const box = $("hosts");
@@ -266,10 +267,14 @@ function render() {
       };
     });
   }
-  let shown = Math.max(2, extraHosts);
-  state.h.forEach((h, i) => { if (h.known || h.on) shown = Math.max(shown, i + 1); });
-  extraHosts = shown;
-  $("addRow").classList.toggle("hidden", shown >= state.h.length);
+  let top = 0;
+  state.h.forEach((h, i) => { if (h.known || h.on) top = i + 1; });          // forgotten computers vanish; the ones after them move up on the hub
+  if (adding && state.h.filter((h) => h.known || h.on).length > addBase) adding = false;
+  let shown = top + (adding ? 1 : 0);
+  if (shown === 0) shown = 1;                                                 // nothing paired yet: one empty card to start with
+  if (state.pair) shown = Math.max(shown, state.pair);
+  shown = Math.min(shown, state.h.length);
+  $("addRow").classList.toggle("hidden", shown >= state.h.length || adding);
   const place = ["left-most", "middle 1", "middle 2", "right-most"];
   state.h.forEach((h, i) => {
     const c = $("host" + i), isActive = state.active === i;

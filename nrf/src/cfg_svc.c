@@ -13,7 +13,7 @@ static const struct bt_uuid_128 uuid_svc = BT_UUID_INIT_128(CFG_UUID(1));
 static const struct bt_uuid_128 uuid_state = BT_UUID_INIT_128(CFG_UUID(2));
 static const struct bt_uuid_128 uuid_cmd = BT_UUID_INIT_128(CFG_UUID(3));
 
-static char snap[760];
+static char snap[1400];
 static size_t snap_len;
 
 static ssize_t read_state(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t off)
