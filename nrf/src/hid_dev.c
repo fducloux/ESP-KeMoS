@@ -496,8 +496,8 @@ static void link_fn(struct k_work *w)
             if (!bad) { if (is_active) idle_tries[hc[i].host] = 0; continue; }
             if (!is_active && idle_tries[hc[i].host] >= 2) continue;     // macOS puts it back each time: leave it
             if (!is_active) idle_tries[hc[i].host]++;
-            static const struct bt_le_conn_param fast = BT_LE_CONN_PARAM_INIT(6, 6, 0, 400);      // macOS takes the top of a range
-            static const struct bt_le_conn_param idle = BT_LE_CONN_PARAM_INIT(24, 40, 0, 400);
+            static const struct bt_le_conn_param fast = BT_LE_CONN_PARAM_INIT(6, 6, 0, 1000);     // macOS takes the top of a range; 10 s supervision timeout: a radio hiccup of a few seconds must not drop the link
+            static const struct bt_le_conn_param idle = BT_LE_CONN_PARAM_INIT(24, 40, 0, 1000);   // (Windows had chosen 9.6 s itself; asking for 4 s made it drop on short stalls: reason 0x08)
             int rc = bt_conn_le_param_update(hc[i].conn, is_active ? &fast : &idle);
             LOG_INF("computer %d link is %u.%02u ms latency %u, asking %s (rc %d)", hc[i].host + 1,
                     ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency,

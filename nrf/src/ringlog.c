@@ -1,4 +1,4 @@
-// The hub keeps its own log: about the last 150 lines in RAM (roughly half an hour of connection events), readable over
+// The hub keeps its own log: about the last 300 lines in RAM (roughly half an hour of connection events), readable over
 // Bluetooth (config service characteristic ...0004) so nothing has to be unplugged to see what happened.
 // It is a Zephyr log backend, so it receives everything the console receives, minus the busy mouse statistics.
 #include <string.h>
@@ -10,7 +10,7 @@
 #include <zephyr/logging/log_core.h>
 #include "ringlog.h"
 
-#define N_ENT 150
+#define N_ENT 300
 #define TXT   150
 #define TS    19                       // length of the "[00:00:03.001,495] " time stamp in front of every line
 
@@ -23,7 +23,7 @@ static size_t line_len;
 
 static void push(const char *text)
 {
-    if (strstr(text, "mouse 2 s,") || !strncmp(text, "alive ", 6)) return;   // the pointer statistics and the console heartbeat repeat every 2 s: not worth the space
+    if (strstr(text, "mouse 2 s,") || !strncmp(text, "alive ", 6) || strstr(text, "lumpy arrivals") || strstr(text, "hub: slot 1 link ")) return;   // the pointer statistics and the console heartbeat repeat every 2 s: not worth the space
     k_spinlock_key_t k = k_spin_lock(&lock);
     struct ent *last = next_seq > 1 ? &ring[(next_seq - 2) % N_ENT] : NULL;
     if (last && strlen(text) > TS && strlen(last->text) > TS && !strcmp(last->text + TS, text + TS) && last->rep < 60000) {
