@@ -761,7 +761,8 @@ static void blue_stop(void);
 static void on_disconnected(struct bt_conn *c, uint8_t reason)
 {
     if (hid_dev_is_host_conn(c)) {
-        LOG_WRN("computer %d disconnected, reason 0x%02x", hid_dev_host_of(c) + 1, reason);
+        char das[BT_ADDR_LE_STR_LEN]; bt_addr_le_to_str(bt_conn_get_dst(c), das, sizeof(das));
+        LOG_WRN("computer %d (%s) disconnected, reason 0x%02x", hid_dev_host_of(c) + 1, das, reason);
         hid_dev_conn_close(c);            // advertising restarts in on_recycled, when the connection object is free
         return;
     }

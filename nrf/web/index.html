@@ -104,6 +104,13 @@ input[type=text] { width: 9em; }
       <div class="hint" id="pairMxHint">Put the MX device in pairing mode (hold its Easy-Switch button about 3 seconds). If the keyboard asks for a code, it shows here once pairing is open. The mouse needs no code.</div>
     </div>
 
+    <h2>Diagnostics</h2>
+    <div class="card">
+      <div class="hint" style="margin:0 0 10px">The hub keeps its last ~150 events (about half an hour of connections, drops and pairings) in memory. Read them here after something goes wrong. They are lost when the hub loses power.</div>
+      <div class="actions" style="margin-top:0"><button id="readLog">Read the hub log</button><button id="copyLog" disabled>Copy</button></div>
+      <textarea id="logBox" readonly spellcheck="false" style="display:none;width:100%;box-sizing:border-box;height:260px;margin-top:10px;font:12px/1.35 ui-monospace,Menlo,monospace"></textarea>
+    </div>
+
     <h2>Shortcuts</h2>
     <div class="card">
       <div class="hint" style="margin:0 0 12px">Ctrl + Shift + Left Arrow switches to computer 1, Ctrl + Shift + Right Arrow to computer 2.</div>
@@ -306,6 +313,28 @@ let userClosed = false;
 $("closeSetup").onclick = () => { userClosed = true; send("setup 0"); };
 $("runSetup").onclick = () => send("setup 1");
 $("learnNs").onclick = () => send("learn 2");
+const CH_LOG = "5a6f0004-6b76-4d48-8f2e-7d9c1b2a3c4d";
+$("readLog").onclick = async () => {
+  const btn = $("readLog"); btn.disabled = true; btn.textContent = "Reading…";
+  try {
+    const ch = await (await server.getPrimaryService(SVC)).getCharacteristic(CH_LOG);
+    let pos = 0; const out = [];
+    for (let i = 0; i < 300; i++) {
+      await (ch.writeValueWithResponse ? ch.writeValueWithResponse(new TextEncoder().encode(String(pos))) : ch.writeValue(new TextEncoder().encode(String(pos))));
+      const lines = new TextDecoder().decode(await ch.readValue()).split("\n").filter(Boolean);
+      if (!lines.length) break;
+      out.push(...lines);
+      const last = parseInt(lines[lines.length - 1], 10);
+      if (!(last >= pos)) break;
+      pos = last + 1;
+    }
+    const box = $("logBox"); box.style.display = "block";
+    box.value = out.map((l) => l.replace(/^\d+\|/, "")).join("\n") || "(the log is empty)";
+    box.scrollTop = box.scrollHeight; $("copyLog").disabled = false;
+  } catch (e) { say("Could not read the log: " + (e.message || e.name), true); }
+  btn.disabled = false; btn.textContent = "Read the hub log";
+};
+$("copyLog").onclick = async () => { try { await navigator.clipboard.writeText($("logBox").value); $("copyLog").textContent = "Copied"; setTimeout(() => ($("copyLog").textContent = "Copy"), 1500); } catch (e) { $("logBox").select(); } };
 $("pairMx").onclick = () => { pairMxUntil = Date.now() + 60000; send("pairmx"); };
 
 async function open() {

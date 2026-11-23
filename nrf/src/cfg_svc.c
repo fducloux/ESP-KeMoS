@@ -3,7 +3,9 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <stdlib.h>
 #include "cfg_svc.h"
+#include "ringlog.h"
 
 LOG_MODULE_REGISTER(cfg, LOG_LEVEL_INF);
 
@@ -12,6 +14,7 @@ LOG_MODULE_REGISTER(cfg, LOG_LEVEL_INF);
 static const struct bt_uuid_128 uuid_svc = BT_UUID_INIT_128(CFG_UUID(1));
 static const struct bt_uuid_128 uuid_state = BT_UUID_INIT_128(CFG_UUID(2));
 static const struct bt_uuid_128 uuid_cmd = BT_UUID_INIT_128(CFG_UUID(3));
+static const struct bt_uuid_128 uuid_log = BT_UUID_INIT_128(CFG_UUID(4));          // write a line number, read the log from there (240 bytes per read)
 
 static char snap[1400];
 static size_t snap_len;
@@ -39,10 +42,32 @@ static ssize_t write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
     return len;
 }
 
+static uint32_t log_pos;
+static char log_chunk[240];
+static size_t log_chunk_len;
+
+static ssize_t read_log(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t off)
+{
+    if (!cfg_access_ok(conn)) return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
+    if (off == 0) log_chunk_len = ringlog_read(log_pos, log_chunk, sizeof(log_chunk));
+    return bt_gatt_attr_read(conn, attr, buf, len, off, log_chunk, log_chunk_len);
+}
+
+static ssize_t write_log(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len, uint16_t off, uint8_t flags)
+{
+    if (!cfg_access_ok(conn)) return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
+    char t[12];
+    if (off || len == 0 || len >= sizeof(t)) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    memcpy(t, buf, len); t[len] = 0;
+    log_pos = strtoul(t, NULL, 10);
+    return len;
+}
+
 BT_GATT_SERVICE_DEFINE(cfg_svc,
     BT_GATT_PRIMARY_SERVICE(&uuid_svc),
     BT_GATT_CHARACTERISTIC(&uuid_state.uuid, BT_GATT_CHRC_READ, BT_GATT_PERM_READ, read_state, NULL, NULL),
     BT_GATT_CHARACTERISTIC(&uuid_cmd.uuid, BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE, NULL, write_cmd, NULL),
+    BT_GATT_CHARACTERISTIC(&uuid_log.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, read_log, write_log, NULL),
 );
 
 static int cfg_init(void) { k_work_init(&cmd_work, cmd_fn); return 0; }
