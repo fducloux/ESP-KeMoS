@@ -67,7 +67,7 @@ static struct { uint8_t gap[NUM_HOSTS]; uint8_t even; } mouse_saved;     // per 
 static bool mouse_saved_ok;
 static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
 static volatile int64_t last_key_ms;       // uptime of the last keyboard report (the gaze prototype does not switch computers while you type)
-static uint8_t nosleep_bits;                 // bit per computer: a Left Shift tap every 30 s keeps it awake
+static uint8_t nosleep_bits;                 // bit per computer: an F15 tap every 30 s keeps it awake
 static char why_log[320];                     // last bond removals with their reason, kept in flash (UART key W)
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
@@ -1018,7 +1018,8 @@ static void bond_cb(const struct bt_bond_info *info, void *ud)
     LOG_INF("stored bond: %s", as);
 }
 
-// No-sleep: every 30 s a Left Shift tap goes to each computer that has it on (it counts as activity and types nothing).
+// No-sleep: every 30 s an F15 tap goes to each computer that has it on (it counts as activity and types nothing). It used to be a Left Shift
+// tap, but five Shift presses in a row open the Windows Sticky Keys prompt with a beep, and at night nothing else interrupts the series.
 // Never while the active computer is being typed on. The LEDs show the selected computer and its no-sleep state (see below).
 static void ns_fn(struct k_work *w);
 static K_WORK_DELAYABLE_DEFINE(ns_work, ns_fn);
@@ -1033,7 +1034,7 @@ static void ns_fn(struct k_work *w)
             if (!((nosleep_bits >> h) & 1) || !hid_dev_connected(h)) continue;
             if (h == active && anykey) continue;
             uint8_t rpt[8] = {0};
-            if (press) rpt[0] = 0x02;
+            if (press) rpt[2] = 0x6A;                    // F15: the key "keep awake" tools use; Windows and macOS ignore it
             hid_dev_send_keyboard(h, rpt);
         }
     }
