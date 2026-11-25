@@ -416,7 +416,7 @@ static void keepalive(void)
 
 // Battery level for the web page. The standard Battery Service (0x2A19) is looked up and read after
 // setup is done (never during it, so it does not slow down a reconnect): when the page asks (at most once
-// a minute per device) and every 5 minutes from upd_tick, so a value is ready when the page opens.
+// a minute per device).
 static int battery_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_attr *attr, void *arg)
 {
     input_t *d = arg;
@@ -739,7 +739,7 @@ static int write_cb(uint16_t c, const struct ble_gatt_error *e, struct ble_gatt_
     return 0;
 }
 
-static int discover(input_t *d)
+static int discover_once(input_t *d)
 {
     uint16_t conn = d->conn, map_handle = 0;
     int rc;
@@ -800,12 +800,11 @@ static int discover(input_t *d)
         if (type == 1 && cccd && (chrs[i].props & BLE_GATT_CHR_PROP_NOTIFY) && d->n_rep < MAX_REPORTS) {
             static const uint8_t on[2] = {1, 0};
             rc = wait_gatt(ble_gattc_write_flat(conn, cccd, on, 2, write_cb, NULL));
-            if (rc == 0) {
-                d->rep[d->n_rep].handle = chrs[i].val;
-                d->rep[d->n_rep].id = rid;
-                d->rep[d->n_rep].cccd = cccd;
-                d->n_rep++;
-            }
+            if (rc) { ESP_LOGW(TAG, "report %d: subscribing failed (%d)", d->n_rep + 1, rc); return rc; }   // never go ready with a report missing
+            d->rep[d->n_rep].handle = chrs[i].val;
+            d->rep[d->n_rep].id = rid;
+            d->rep[d->n_rep].cccd = cccd;
+            d->n_rep++;
         } else if (type == 2 && !d->led_handle) {
             d->led_handle = chrs[i].val;
         }
@@ -815,6 +814,20 @@ static int discover(input_t *d)
         d->cached = false;   // cache disabled: instant setup overlapped the mouse's own link update (controller crash)
     }
     return d->n_rep ? 0 : -1;
+}
+
+// Setup is tried up to 3 times (300 ms apart): NimBLE sometimes answers a first request with 6
+// (out of memory: a small internal pool is full for a moment), and a half set up mouse is worse than a retry.
+static int discover(input_t *d)
+{
+    int rc = -1;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        rc = discover_once(d);
+        if (rc == 0 || d->conn == NONE) return rc;
+        ESP_LOGW(TAG, "Input device %d: setup try %d failed (%d), free mbufs %d", (int)(d - in) + 1, attempt, rc, os_msys_num_free());
+        if (attempt < 3) vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    return rc;
 }
 
 static void disc_task(void *arg)
@@ -1358,7 +1371,6 @@ static struct ble_npl_callout upd_co;
 static void upd_tick(struct ble_npl_event *ev)
 {
     if (pad.ok && esp_log_timestamp() - pad.seen_ms > 3500) { pad.ok = false; ESP_LOGW(TAG, "Pad: no heartbeat, marked offline"); }
-    for (int i = 0; i < NUM_INPUTS; i++) battery_refresh(&in[i], 300000);
     int was_pairing = pair_target;
     pairing_on(-1);
     if (was_pairing && !pair_target) start_scan();      // pairing window ran out
