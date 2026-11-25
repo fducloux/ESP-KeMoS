@@ -67,7 +67,7 @@ static struct { uint8_t gap[NUM_HOSTS]; uint8_t even; } mouse_saved;     // per 
 static bool mouse_saved_ok;
 static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none) for the switch and no-sleep hotkey clicks
 static volatile int64_t last_key_ms;       // uptime of the last keyboard report (the gaze prototype does not switch computers while you type)
-static uint8_t nosleep_bits;                 // bit per computer: an F15 tap every 30 s keeps it awake
+static uint8_t nosleep_bits;                 // bit per computer: a Left then Right Shift tap every 30 s keeps it awake
 static char why_log[320];                     // last bond removals with their reason, kept in flash (UART key W)
 static uint8_t new_id_pending;                // 1 = at the next boot give the computers a new Bluetooth address (UART key I)
 
@@ -311,6 +311,12 @@ static void build_kbd_report(uint8_t rpt[8])
     if (mod_swap & (1 << active)) {
         uint8_t mo = rpt[0];
         rpt[0] = (mo & 0x33) | ((mo & 0x04) << 1) | ((mo & 0x08) >> 1) | ((mo & 0x40) << 1) | ((mo & 0x80) >> 1);
+        // In Mac layout the MX Keys sends F12 for its apps key and F11 for show desktop; macOS would read them as volume keys.
+        // send_keys sends them as a Mac keyboard does: Launchpad (0x2A0), and Mission Control (0x29F) with Command held.
+        for (int i = 2; i < 8; i++) {
+            if (rpt[i] == 0x45) rpt[i] = 0;
+            else if (rpt[i] == 0x44) { rpt[i] = 0; rpt[0] |= 0x08; }
+        }
     }
 }
 
@@ -320,6 +326,11 @@ static void send_keys(void)
     uint8_t rpt[8];
     build_kbd_report(rpt);
     hid_dev_send_keyboard(active, rpt);
+    if (mod_swap & (1 << active)) {                  // apps key and show-desktop key: media usages, as a Mac keyboard sends them
+        static uint16_t sent_usage;
+        uint16_t u = (bm_get(keys, 0x45) && !bm_get(suppressed, 0x45)) ? 0x2A0 : (bm_get(keys, 0x44) && !bm_get(suppressed, 0x44)) ? 0x29F : 0;
+        if (u != sent_usage) { sent_usage = u; hid_dev_send_consumer(active, u); }
+    }
 }
 
 static void forward_leds(void)
@@ -471,7 +482,11 @@ static uint8_t report_cb(struct bt_hogp *h, struct bt_hogp_rep_info *rep, uint8_
         process_keys();
     } else if (h == &in[0].hogp && id == 3 && n >= 2) {  // MX Keys: media keys, one 16-bit usage
         consumer = sys_get_le16(data);
-        if (consumer != last_consumer) { last_consumer = consumer; hid_dev_send_consumer(active, consumer); }
+        if (consumer != last_consumer) {
+            last_consumer = consumer;
+            int crc = hid_dev_send_consumer(active, consumer);
+            LOG_INF("consumer 0x%04x -> computer %d rc %d (connected %d)", consumer, active + 1, crc, hid_dev_connected(active));
+        }
     } else if (h == &in[1].hogp && id == 2 && n == 7) {  // MX Master: 16 buttons, X/Y 12 bit, wheel, pan
         int16_t x = (int16_t)(data[2] | ((data[3] & 0x0f) << 8)); if (x & 0x800) x |= 0xf000;
         int16_t y = (int16_t)((data[3] >> 4) | (data[4] << 4));   if (y & 0x800) y |= 0xf000;
@@ -1019,8 +1034,7 @@ static void bond_cb(const struct bt_bond_info *info, void *ud)
     LOG_INF("stored bond: %s", as);
 }
 
-// No-sleep: every 30 s an F15 tap goes to each computer that has it on (it counts as activity and types nothing). It used to be a Left Shift
-// tap, but five Shift presses in a row open the Windows Sticky Keys prompt with a beep, and at night nothing else interrupts the series.
+// No-sleep: every 30 s a Left Shift tap and then a Right Shift tap (100 ms each) go to each computer that has it on (counts as activity, types nothing).
 // Never while the active computer is being typed on. The LEDs show the selected computer and its no-sleep state (see below).
 static void ns_fn(struct k_work *w);
 static K_WORK_DELAYABLE_DEFINE(ns_work, ns_fn);
@@ -1028,14 +1042,16 @@ static void ns_fn(struct k_work *w)
 {
     static unsigned n;
     n++;
-    if ((n % 300) == 0 || (n % 300) == 1) {                    // press, then release 100 ms later
-        bool press = (n % 300) == 0, anykey = false;
+    if ((n % 300) < 4) {                                       // 0: Left Shift down, 1: up, 2: Right Shift down, 3: up
+        unsigned ph = n % 300;
+        bool anykey = false;
         for (int b = 0; b < 32; b++) anykey |= keys[b] != 0;
         for (int h = 0; h < NUM_HOSTS; h++) {
             if (!((nosleep_bits >> h) & 1) || !hid_dev_connected(h)) continue;
             if (h == active && anykey) continue;
             uint8_t rpt[8] = {0};
-            if (press) rpt[2] = 0x6A;                    // F15: the key "keep awake" tools use; Windows and macOS ignore it
+            if (ph == 0) rpt[0] = 0x02;                  // Left Shift
+            else if (ph == 2) rpt[0] = 0x20;             // Right Shift
             hid_dev_send_keyboard(h, rpt);
         }
     }
