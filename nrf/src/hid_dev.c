@@ -3,6 +3,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <bluetooth/services/hids.h>
 #include "hid_dev.h"
 
@@ -170,12 +171,27 @@ static const struct bt_data sd[] = {
 };
 
 static uint8_t adv_id = BT_ID_DEFAULT;
-static const bt_addr_le_t hub_addr = { .type = BT_ADDR_LE_RANDOM, .a = { .val = { 0x01, 0xC0, 0x8E, 0x33, 0xFF, 0xC0 } } };   // C0:FF:33:8E:C0:01
-static const bt_addr_le_t setup_addr = { .type = BT_ADDR_LE_RANDOM, .a = { .val = { 0x00, 0xC0, 0x8E, 0x33, 0xFF, 0xC0 } } };   // C0:FF:33:8E:C0:00, the setup advertisement
+// Fixed static random addresses C0:FF:33:XX:YY:ZZ. XX:YY come from the chip's own factory ID, so two hubs never share an address and
+// one hub keeps the same address through every reflash or erase. ZZ is the role: 01 = the link the computers pair with, 00 = the setup page.
+static bt_addr_le_t hub_addr = { .type = BT_ADDR_LE_RANDOM };
+static bt_addr_le_t setup_addr = { .type = BT_ADDR_LE_RANDOM };
+static void make_addrs(void)
+{
+    uint8_t id[8] = {0};
+    hwinfo_get_device_id(id, sizeof(id));
+    uint8_t x = id[0] ^ id[2] ^ id[4] ^ id[6] ^ 0x5A, y = id[1] ^ id[3] ^ id[5] ^ id[7] ^ 0xA5;
+    static const uint8_t pre[3] = { 0xC0, 0xFF, 0x33 };
+    for (int i = 0; i < 2; i++) {
+        bt_addr_le_t *a = i ? &setup_addr : &hub_addr;
+        a->a.val[0] = i ? 0x00 : 0x01; a->a.val[1] = y; a->a.val[2] = x;
+        a->a.val[3] = pre[2]; a->a.val[4] = pre[1]; a->a.val[5] = pre[0];
+    }
+}
 
 
 void hid_dev_id_setup(void)
 {
+    make_addrs();
     bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
     size_t n = CONFIG_BT_ID_MAX;
     bt_id_get(addrs, &n);

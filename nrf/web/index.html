@@ -76,7 +76,7 @@ input[type=text] { width: 9em; }
     <div class="row">
       <div class="grow">
         <div class="name" id="connName">Settings not opened yet</div>
-        <div class="hint" id="connHint">Press Connect and pick “8REC-KM setup” in the list (Bluetooth address C0:FF:33:8E:C0:00). The plain “8REC-KM” (C0:FF:33:8E:C0:01) is the keyboard and mouse link your computers pair with. This opens the hub’s settings. Your keyboard and mouse keep working either way.</div>
+        <div class="hint" id="connHint">Press Connect and pick “8REC-KM setup” in the list (its Bluetooth address is C0:FF:33:…:00). The plain “8REC-KM” (…:01) is the keyboard and mouse link your computers pair with. The middle bytes are unique to each hub. This opens the hub’s settings. Your keyboard and mouse keep working either way.</div>
       </div>
       <button class="primary" id="connectBtn">Connect</button>
     </div>
@@ -325,7 +325,7 @@ function closed() {
   clearInterval(timer); chState = chCmd = null; state = null;
   $("panel").classList.add("hidden"); $("hosts").innerHTML = "";
   $("connName").textContent = "Settings not opened yet";
-  $("connHint").textContent = "Press Connect and pick “8REC-KM setup” in the list (Bluetooth address C0:FF:33:8E:C0:00). The plain “8REC-KM” (C0:FF:33:8E:C0:01) is the keyboard and mouse link your computers pair with. This opens the hub’s settings. Your keyboard and mouse keep working either way.";
+  $("connHint").textContent = "Press Connect and pick “8REC-KM setup” in the list (its Bluetooth address is C0:FF:33:…:00). The plain “8REC-KM” (…:01) is the keyboard and mouse link your computers pair with. The middle bytes are unique to each hub. This opens the hub’s settings. Your keyboard and mouse keep working either way.";
   $("connectBtn").textContent = "Connect";
 }
 
