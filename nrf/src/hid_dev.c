@@ -171,6 +171,7 @@ static const struct bt_data sd[] = {
 
 static uint8_t adv_id = BT_ID_DEFAULT;
 static const bt_addr_le_t hub_addr = { .type = BT_ADDR_LE_RANDOM, .a = { .val = { 0x01, 0xC0, 0x8E, 0x33, 0xFF, 0xC0 } } };   // C0:FF:33:8E:C0:01
+static const bt_addr_le_t setup_addr = { .type = BT_ADDR_LE_RANDOM, .a = { .val = { 0x00, 0xC0, 0x8E, 0x33, 0xFF, 0xC0 } } };   // C0:FF:33:8E:C0:00, the setup advertisement
 
 
 void hid_dev_id_setup(void)
@@ -183,7 +184,7 @@ void hid_dev_id_setup(void)
     adv_id = id;
     n = CONFIG_BT_ID_MAX;
     bt_id_get(addrs, &n);
-    int cid = n >= 3 ? 2 : bt_id_create(NULL, NULL);          // a third address for the phone's setup link (it must not look like a keyboard)
+    int cid = n >= 3 ? 2 : bt_id_create((bt_addr_le_t *)&setup_addr, NULL);          // a third address for the phone's setup link (it must not look like a keyboard)
     if (cid < 0) LOG_ERR("bt_id_create (setup) %d", cid); else cfg_id = cid;
     n = CONFIG_BT_ID_MAX;
     bt_id_get(addrs, &n);
@@ -210,6 +211,18 @@ int hid_dev_new_identity(void)
     if (adv_id < n) bt_addr_le_to_str(&addrs[adv_id], as, sizeof(as));
     LOG_INF("fixed Bluetooth address for the computers (rc %d): %s", rc, as);
     return rc >= 0 ? 1 : rc;
+}
+
+// The setup advertisement ("8REC-KM setup") has a fixed address too, C0:FF:33:8E:C0:00, so the page can say which device to pick.
+// Nothing is ever paired on it, so changing it costs nothing. Only at boot, before advertising starts.
+void hid_dev_fix_setup_identity(void)
+{
+    bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
+    size_t n = CONFIG_BT_ID_MAX;
+    bt_id_get(addrs, &n);
+    if (cfg_id < 2 || cfg_id >= n || !bt_addr_le_cmp(&addrs[cfg_id], &setup_addr)) return;
+    int rc = bt_id_reset(cfg_id, (bt_addr_le_t *)&setup_addr, NULL);
+    LOG_INF("fixed Bluetooth address for the setup link (rc %d)", rc);
 }
 
 static struct bt_le_ext_adv *adv_set;

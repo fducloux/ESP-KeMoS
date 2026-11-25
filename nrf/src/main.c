@@ -1081,6 +1081,7 @@ int main(void)
         static const uint8_t zero;
         if (new_id_pending) { new_id_pending = 0; kvm_save("newid", &zero, 1); }
         if (hid_dev_new_identity() > 0) unpair_why(1, NULL, "fixed Bluetooth address");     // only if it changed: the computers' old pairings belong to the old address
+        hid_dev_fix_setup_identity();
     }
     if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);       // older single setting: all computers
     if (mouse_saved_ok) for (int h = 0; h < NUM_HOSTS; h++) hid_dev_set_host_mouse(h, mouse_saved.gap[h], (mouse_saved.even >> h) & 1);
