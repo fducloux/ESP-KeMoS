@@ -170,6 +170,7 @@ static const struct bt_data sd[] = {
 };
 
 static uint8_t adv_id = BT_ID_DEFAULT;
+static const bt_addr_le_t hub_addr = { .type = BT_ADDR_LE_RANDOM, .a = { .val = { 0x01, 0xC0, 0x8E, 0x33, 0xFF, 0xC0 } } };   // C0:FF:33:8E:C0:01
 
 
 void hid_dev_id_setup(void)
@@ -177,7 +178,7 @@ void hid_dev_id_setup(void)
     bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
     size_t n = CONFIG_BT_ID_MAX;
     bt_id_get(addrs, &n);
-    int id = n >= 2 ? 1 : bt_id_create(NULL, NULL);
+    int id = n >= 2 ? 1 : bt_id_create((bt_addr_le_t *)&hub_addr, NULL);      // a brand-new hub starts with the fixed address
     if (id < 0) { LOG_ERR("bt_id_create %d", id); return; }
     adv_id = id;
     n = CONFIG_BT_ID_MAX;
@@ -188,6 +189,27 @@ void hid_dev_id_setup(void)
     bt_id_get(addrs, &n);
     char as[BT_ADDR_LE_STR_LEN]; bt_addr_le_to_str(&addrs[id], as, sizeof(as));
     LOG_INF("computers see identity %d: %s", id, as);
+}
+
+// A new random address for the identity the computers see. Windows keeps a device entry and a cached GATT layout per
+// address: a computer that cannot clear them (no admin rights) sees a brand-new device instead. Only at boot, before any
+// advertising set or connection uses the identity. The computers must be paired again.
+// The address is FIXED (C0:FF:33:8E:C0:01, a static random address: the top two bits are 11). A fixed address means a computer
+// keeps exactly one device entry for the hub, however often the hub is reflashed or erased. Returns 1 if it changed, 0 if it
+// already was this address.
+int hid_dev_new_identity(void)
+{
+    bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
+    size_t n = CONFIG_BT_ID_MAX;
+    bt_id_get(addrs, &n);
+    if (adv_id < n && !bt_addr_le_cmp(&addrs[adv_id], &hub_addr)) { LOG_INF("the computers already see the fixed address"); return 0; }
+    int rc = bt_id_reset(adv_id, (bt_addr_le_t *)&hub_addr, NULL);
+    n = CONFIG_BT_ID_MAX;
+    bt_id_get(addrs, &n);
+    char as[BT_ADDR_LE_STR_LEN] = "?";
+    if (adv_id < n) bt_addr_le_to_str(&addrs[adv_id], as, sizeof(as));
+    LOG_INF("fixed Bluetooth address for the computers (rc %d): %s", rc, as);
+    return rc >= 0 ? 1 : rc;
 }
 
 static struct bt_le_ext_adv *adv_set;
@@ -277,7 +299,7 @@ static int send(int h, uint8_t idx, const uint8_t *r, uint8_t len)
 {
     struct bt_conn *c = hid_dev_conn_for(h);
     if (!c) return -ENOTCONN;
-    k_mutex_lock(&send_lock, K_FOREVER);
+    if (k_mutex_lock(&send_lock, K_MSEC(50))) return -EBUSY;      // another send is stuck behind a bad link: give up, never queue up behind it
     int rc = bt_hids_inp_rep_send(&hids, c, idx, r, len, NULL);
     k_mutex_unlock(&send_lock);
     return rc;
@@ -326,7 +348,7 @@ static void mouse_flush(void)
     if (atomic_get(&inflight)) return;
     struct bt_conn *c = hid_dev_conn_for(active_host);
     if (!c) return;
-    k_mutex_lock(&send_lock, K_FOREVER);
+    if (k_mutex_lock(&send_lock, K_MSEC(50))) { k_work_reschedule_for_queue(&mouse_q, &mouse_work, K_MSEC(20)); return; }   // a keyboard send is stuck: try again later
     if (atomic_get(&inflight)) { k_mutex_unlock(&send_lock); return; }
     int gap = host_gap[active_host];
     if (gap) {                                          // keep the reports evenly spaced
@@ -496,8 +518,8 @@ static void link_fn(struct k_work *w)
             if (!bad) { if (is_active) idle_tries[hc[i].host] = 0; continue; }
             if (!is_active && idle_tries[hc[i].host] >= 2) continue;     // macOS puts it back each time: leave it
             if (!is_active) idle_tries[hc[i].host]++;
-            static const struct bt_le_conn_param fast = BT_LE_CONN_PARAM_INIT(6, 6, 0, 400);      // macOS takes the top of a range
-            static const struct bt_le_conn_param idle = BT_LE_CONN_PARAM_INIT(24, 40, 0, 400);
+            static const struct bt_le_conn_param fast = BT_LE_CONN_PARAM_INIT(6, 6, 0, 1000);     // macOS takes the top of a range; 10 s supervision timeout: a radio hiccup of a few seconds must not drop the link
+            static const struct bt_le_conn_param idle = BT_LE_CONN_PARAM_INIT(24, 40, 0, 1000);   // (Windows had chosen 9.6 s itself; asking for 4 s made it drop on short stalls: reason 0x08)
             int rc = bt_conn_le_param_update(hc[i].conn, is_active ? &fast : &idle);
             LOG_INF("computer %d link is %u.%02u ms latency %u, asking %s (rc %d)", hc[i].host + 1,
                     ci.le.interval * 5 / 4, (ci.le.interval * 125) % 100, ci.le.latency,

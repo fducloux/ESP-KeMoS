@@ -11,6 +11,7 @@
 void hid_dev_init(void);
 // make sure the computer-facing identity exists (call after settings_load)
 void hid_dev_id_setup(void);
+int hid_dev_new_identity(void);      // a new Bluetooth address for the computers (only before advertising has started)
 void hid_dev_adv_start(void);
 void hid_dev_cfg_adv(bool on);                           // the phone's setup advertisement (own address, not a keyboard), on while setup is open
 void hid_dev_beacon(bool on);                            // the always-on scannable advertisement for the config page

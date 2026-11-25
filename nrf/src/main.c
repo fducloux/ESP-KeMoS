@@ -69,12 +69,14 @@ static uint8_t sw_btn, ns_btn = 4;           // mouse buttons (1-based, 0 = none
 static volatile int64_t last_key_ms;       // uptime of the last keyboard report (the gaze prototype does not switch computers while you type)
 static uint8_t nosleep_bits;                 // bit per computer: an F15 tap every 30 s keeps it awake
 static char why_log[320];                     // last bond removals with their reason, kept in flash (UART key W)
+static uint8_t new_id_pending;                // 1 = at the next boot give the computers a new Bluetooth address (UART key I)
 
 static int kvm_set(const char *name, size_t len, settings_read_cb rd, void *cb_arg)
 {
     if (!strcmp(name, "swap")) return rd(cb_arg, &mod_swap, 1) < 0 ? -EIO : 0;
     if (!strcmp(name, "btn")) { uint8_t b[2] = {0}; int r = rd(cb_arg, b, 2); if (r >= 2) { sw_btn = b[0]; ns_btn = b[1]; } return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "ns")) return rd(cb_arg, &nosleep_bits, 1) < 0 ? -EIO : 0;
+    if (!strcmp(name, "newid")) return rd(cb_arg, &new_id_pending, 1) < 0 ? -EIO : 0;
     if (!strcmp(name, "why")) { int r = rd(cb_arg, why_log, sizeof(why_log) - 1); why_log[r > 0 ? r : 0] = 0; return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "mouse")) { int r = rd(cb_arg, &mouse_saved, sizeof(mouse_saved)); mouse_saved_ok = r == sizeof(mouse_saved); return r < 0 ? -EIO : 0; }
     if (!strcmp(name, "gap")) return rd(cb_arg, &mouse_gap_saved, sizeof(mouse_gap_saved)) < 0 ? -EIO : 0;
@@ -694,7 +696,7 @@ static void setup_begin(bool wizard, int minutes)
 {
     setup_open = true;
     hid_dev_cfg_adv(true);
-    setup_until = k_uptime_get() + (int64_t)minutes * 60000;
+    setup_until = 0;                              // never closes by itself: only the page's Close button (or a reset) ends it. `minutes` is ignored on purpose
     LOG_INF("setup open for %d min%s", minutes, wizard ? " (wizard)" : "");
     if (wizard) setup_enter_step(ST_KBD); else setup_step = ST_DONE;
 }
@@ -858,7 +860,7 @@ void nfc_tapped(void)
 
 int cfg_status(char *buf, size_t n)
 {
-    char why_json[sizeof(why_log)];                              // the last bond removals and their reasons, plain characters only
+    char why_json[101];                                          // the newest bond removals and their reasons, plain characters only; short on purpose: a status over ~740 bytes is cut off by the GATT read
     { size_t j = 0; for (const char *q = why_log; *q && j + 1 < sizeof(why_json); q++) why_json[j++] = (*q >= 0x20 && *q < 0x7f && *q != '"' && *q != '\\') ? *q : '_'; why_json[j] = 0; }
     int o = snprintf(buf, n,
         "{\"v\":3,\"setup\":%d,\"step\":%d,\"code\":%u,\"phone\":%d,\"active\":%d,\"gap\":%d,\"kbd\":%d,\"mouse\":%d,\"pair\":%d,\"pairmx\":%d,\"sw\":%d,\"nsb\":%d,\"learn\":%d,\"nfc\":[%d,%d],\"kidle\":%d,\"why\":\"%s\",\"h\":[",
@@ -1075,6 +1077,11 @@ int main(void)
     hid_dev_init();
     hid_dev_set_reroll(mouse_reroll);
     hid_dev_id_setup();
+    {   // every boot: the computers see the fixed address. It changes once (on the first boot with this firmware), then stays.
+        static const uint8_t zero;
+        if (new_id_pending) { new_id_pending = 0; kvm_save("newid", &zero, 1); }
+        if (hid_dev_new_identity() > 0) unpair_why(1, NULL, "fixed Bluetooth address");     // only if it changed: the computers' old pairings belong to the old address
+    }
     if (mouse_gap_saved >= 0) hid_dev_set_mouse_gap(mouse_gap_saved);       // older single setting: all computers
     if (mouse_saved_ok) for (int h = 0; h < NUM_HOSTS; h++) hid_dev_set_host_mouse(h, mouse_saved.gap[h], (mouse_saved.even >> h) & 1);
     bt_conn_auth_cb_register(&auth_cbs);
@@ -1093,7 +1100,7 @@ int main(void)
         static const uint8_t z[6];
         bool fresh = !memcmp(slot_addr[0].a.val, z, 6) && !memcmp(slot_addr[1].a.val, z, 6) && !host_known(0) && !host_known(1) && !host_known(2) && !host_known(3);
         if (fresh) setup_begin(true, 30);
-        else setup_begin(false, 5);              // every power-up or reset: the phone link is open for 5 minutes (the NFC tag or Ctrl+Shift+8REC reopens it later)
+        else setup_begin(false, 5);              // every power-up or reset: the phone link is open until it is closed on the page
     }
     const struct device *con = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
     for (int n = 0;; n++) {
@@ -1105,6 +1112,7 @@ int main(void)
             else if (c == 'N') links_dump("asked");
             else if (c == 'J') hid_dev_jiggle(6000);
             else if (c == 'R') { LOG_INF("rebooting"); k_sleep(K_MSEC(100)); sys_reboot(SYS_REBOOT_COLD); }
+            else if (c == 'I') { static const uint8_t one = 1; kvm_save("newid", &one, 1); LOG_INF("new Bluetooth address for the computers at the next boot: rebooting"); k_sleep(K_MSEC(300)); sys_reboot(SYS_REBOOT_COLD); }
             else if (c >= 'a' && c <= 'e') {          // test settings for the dot test: spacing and resampling
                 static const struct { int gap; bool rs; } t[] = { {8, false}, {0, false}, {4, false}, {7, false}, {7, true} };
                 hid_dev_set_mouse_gap(t[c - 'a'].gap); hid_dev_set_resample(t[c - 'a'].rs);
